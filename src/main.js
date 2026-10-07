@@ -6,22 +6,17 @@ import {
   inspectBones,
   renderBoneReport,
 } from "./bone-inspector.js";
+import { BONE_MAP } from "./character/BoneMap.js";
 
 const canvas = document.querySelector("#viewer");
 const status = document.querySelector("#status");
 
-if (!canvas) {
-  throw new Error("Canvas #viewer не найден");
-}
-
-if (!status) {
-  throw new Error("Элемент #status не найден");
-}
+if (!canvas) throw new Error("Canvas #viewer не найден");
+if (!status) throw new Error("Элемент #status не найден");
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
   antialias: true,
-  alpha: false,
 });
 
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -40,13 +35,13 @@ const camera = new THREE.PerspectiveCamera(
 
 camera.position.set(0, 1.2, 4);
 
-const ambient = new THREE.HemisphereLight(
-  0xdde8ff,
-  0x20232b,
-  2.2
+scene.add(
+  new THREE.HemisphereLight(
+    0xdde8ff,
+    0x20232b,
+    2.2
+  )
 );
-
-scene.add(ambient);
 
 const keyLight = new THREE.DirectionalLight(
   0xffffff,
@@ -58,7 +53,7 @@ scene.add(keyLight);
 
 const fillLight = new THREE.DirectionalLight(
   0x8fa8ff,
-  1.0
+  1
 );
 
 fillLight.position.set(-3, 2, -2);
@@ -69,7 +64,6 @@ const ground = new THREE.Mesh(
   new THREE.MeshStandardMaterial({
     color: 0x151922,
     roughness: 0.9,
-    metalness: 0,
   })
 );
 
@@ -77,21 +71,8 @@ ground.rotation.x = -Math.PI / 2;
 scene.add(ground);
 
 const loader = new GLTFLoader();
-
 loader.setMeshoptDecoder(MeshoptDecoder);
 
-/*
- * Local asset.
- *
- * Vite BASE_URL automatically includes /astraway-3d/
- * on GitHub Pages.
- *
- * Resolves to:
- * /astraway-3d/models/Xbot.glb
- *
- * Source file:
- * public/models/Xbot.glb
- */
 const MODEL_URL =
   `${import.meta.env.BASE_URL}models/Xbot.glb`;
 
@@ -102,25 +83,22 @@ function setStatus(message) {
   console.log(`[AstraWay] ${message}`);
 }
 
-function withTimeout(promise, milliseconds, stage) {
+function timeout(promise, ms, name) {
   return Promise.race([
     promise,
     new Promise((_, reject) => {
-      setTimeout(() => {
-        reject(
-          new Error(
-            `${stage}: таймаут ${milliseconds / 1000} сек.`
-          )
-        );
-      }, milliseconds);
+      setTimeout(
+        () => reject(
+          new Error(`${name}: timeout ${ms / 1000}s`)
+        ),
+        ms
+      );
     }),
   ]);
 }
 
 function toArrayBuffer(value) {
-  if (value instanceof ArrayBuffer) {
-    return value;
-  }
+  if (value instanceof ArrayBuffer) return value;
 
   if (ArrayBuffer.isView(value)) {
     return value.buffer.slice(
@@ -129,47 +107,15 @@ function toArrayBuffer(value) {
     );
   }
 
-  if (value && value.buffer) {
-    return toArrayBuffer(value.buffer);
-  }
-
-  return null;
-}
-
-function describeValue(value) {
-  if (value === null) {
-    return "null";
-  }
-
-  if (value === undefined) {
-    return "undefined";
-  }
-
-  if (value instanceof ArrayBuffer) {
-    return `ArrayBuffer(${value.byteLength})`;
-  }
-
-  if (ArrayBuffer.isView(value)) {
-    return `${value.constructor.name}(${value.byteLength})`;
-  }
-
-  if (typeof value === "object") {
-    return `object keys=[${Object.keys(value).join(", ")}]`;
-  }
-
-  return typeof value;
+  return value?.buffer
+    ? toArrayBuffer(value.buffer)
+    : null;
 }
 
 function frameModel(root) {
   const box = new THREE.Box3().setFromObject(root);
-
-  const size = box.getSize(
-    new THREE.Vector3()
-  );
-
-  const center = box.getCenter(
-    new THREE.Vector3()
-  );
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
 
   const maxSize = Math.max(
     size.x,
@@ -195,143 +141,254 @@ function frameModel(root) {
   );
 
   camera.lookAt(center);
-
   ground.position.y = box.min.y;
+}
+
+/*
+ * POSE GATE
+ *
+ * Проверяем реальный skeleton graph,
+ * parent → child propagation,
+ * quaternion,
+ * skin,
+ * BoneMap.
+ */
+function runPoseGate(root) {
+  const results = [];
+
+  const find = (logicalName) => {
+    const canonicalName = BONE_MAP[logicalName];
+
+    if (!canonicalName) return null;
+
+    return root.getObjectByName(canonicalName);
+  };
+
+  /*
+   * TEST 1
+   * Все 22 logical bones существуют.
+   */
+  const logicalNames = Object.keys(BONE_MAP);
+
+  const missingLogical = logicalNames.filter(
+    (name) => !find(name)
+  );
+
+  results.push({
+    name: "BoneMap 22/22",
+    pass: missingLogical.length === 0,
+    detail:
+      missingLogical.length === 0
+        ? "all logical bones found"
+        : `missing: ${missingLogical.join(", ")}`,
+  });
+
+  /*
+   * TEST 2
+   * Реальная parent → child иерархия.
+   */
+  const thighL = find("thigh_L");
+  const shinL = find("shin_L");
+  const footL = find("foot_L");
+
+  const hierarchyPass =
+    !!thighL &&
+    !!shinL &&
+    !!footL &&
+    shinL.parent === thighL &&
+    footL.parent === shinL;
+
+  results.push({
+    name: "Leg hierarchy",
+    pass: hierarchyPass,
+    detail: hierarchyPass
+      ? "thigh → shin → foot"
+      : "hierarchy mismatch",
+  });
+
+  /*
+   * TEST 3
+   * Quaternion rotation родителя
+   * реально двигает child в world space.
+   */
+  const upperArm = find("upperArm_L");
+  const foreArm = find("foreArm_L");
+
+  let propagationPass = false;
+  let delta = 0;
+
+  if (upperArm && foreArm) {
+    root.updateMatrixWorld(true);
+
+    const before =
+      new THREE.Vector3();
+
+    foreArm.getWorldPosition(before);
+
+    const original =
+      upperArm.quaternion.clone();
+
+    upperArm.rotateZ(
+      THREE.MathUtils.degToRad(30)
+    );
+
+    root.updateMatrixWorld(true);
+
+    const after =
+      new THREE.Vector3();
+
+    foreArm.getWorldPosition(after);
+
+    delta = before.distanceTo(after);
+
+    upperArm.quaternion.copy(original);
+    root.updateMatrixWorld(true);
+
+    propagationPass = delta > 0.001;
+  }
+
+  results.push({
+    name: "Quaternion propagation",
+    pass: propagationPass,
+    detail: `child world delta=${delta.toFixed(4)}`,
+  });
+
+  /*
+   * TEST 4
+   * SkinnedMesh реально существует.
+   */
+  let skinnedMesh = null;
+
+  root.traverse((object) => {
+    if (object.isSkinnedMesh && !skinnedMesh) {
+      skinnedMesh = object;
+    }
+  });
+
+  results.push({
+    name: "SkinnedMesh",
+    pass: !!skinnedMesh,
+    detail: skinnedMesh
+      ? "skin found"
+      : "no SkinnedMesh",
+  });
+
+  /*
+   * TEST 5
+   * Spine → chest → neck → head
+   * реально образуют цепь.
+   */
+  const spine01 = find("spine01");
+  const spine02 = find("spine02");
+  const chest = find("chest");
+  const neck = find("neck");
+  const head = find("head");
+
+  const spinePass =
+    !!spine01 &&
+    !!spine02 &&
+    !!chest &&
+    !!neck &&
+    !!head &&
+    spine02.parent === spine01 &&
+    chest.parent === spine02 &&
+    neck.parent === chest &&
+    head.parent === neck;
+
+  results.push({
+    name: "Spine hierarchy",
+    pass: spinePass,
+    detail: spinePass
+      ? "spine → chest → neck → head"
+      : "spine hierarchy mismatch",
+  });
+
+  const passCount =
+    results.filter((r) => r.pass).length;
+
+  const total = results.length;
+  const pass = passCount === total;
+
+  console.table(results);
+
+  return {
+    results,
+    passCount,
+    total,
+    pass,
+  };
 }
 
 async function loadModel() {
   try {
-    setStatus("1/7 — Запрос локального X Bot…");
+    setStatus("1/8 — Loading local XBot…");
 
-    const response = await withTimeout(
+    const response = await timeout(
       fetch(MODEL_URL, {
         cache: "no-store",
       }),
       10000,
-      "Fetch X Bot"
-    );
-
-    setStatus(
-      `2/7 — Ответ сервера: HTTP ${response.status}`
+      "Fetch XBot"
     );
 
     if (!response.ok) {
       throw new Error(
-        `X Bot: HTTP ${response.status} ${response.statusText}`
+        `XBot HTTP ${response.status}`
       );
     }
 
-    const contentType =
-      response.headers.get("content-type");
-
-    const contentLength =
-      response.headers.get("content-length");
-
-    console.log(
-      "[AstraWay] Local XBot response:",
-      {
-        url: MODEL_URL,
-        contentType,
-        contentLength,
-      }
-    );
-
-    setStatus("3/7 — Читаем локальный GLB…");
-
-    const buffer = await withTimeout(
+    const buffer = await timeout(
       response.arrayBuffer(),
       10000,
-      "Чтение GLB"
-    );
-
-    if (!(buffer instanceof ArrayBuffer)) {
-      throw new Error(
-        `GLB имеет неожиданный тип: ${describeValue(buffer)}`
-      );
-    }
-
-    if (buffer.byteLength === 0) {
-      throw new Error(
-        "X Bot: получен пустой GLB"
-      );
-    }
-
-    setStatus(
-      `4/7 — GLB получен: ${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB`
-    );
-
-    console.log(
-      "[AstraWay] Raw local GLB:",
-      {
-        type: describeValue(buffer),
-        bytes: buffer.byteLength,
-      }
+      "Read GLB"
     );
 
     setStatus(
-      "5/7 — Канонизируем скелет…"
+      `2/8 — GLB ${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB`
     );
 
-    const canonicalResult =
-      await withTimeout(
+    setStatus("3/8 — Canonicalizing skeleton…");
+
+    const canonical =
+      await timeout(
         canonicalizeGLBBones(buffer),
         10000,
-        "canonicalizeGLBBones"
+        "Canonicalization"
       );
 
-    console.log(
-      "[AstraWay] canonicalize result:",
-      canonicalResult
-    );
-
     const canonicalBuffer =
-      toArrayBuffer(canonicalResult);
+      toArrayBuffer(canonical);
 
     if (!canonicalBuffer) {
       throw new Error(
-        `canonicalizeGLBBones вернул неподдерживаемый тип: ${describeValue(
-          canonicalResult
-        )}`
+        "Canonical GLB buffer invalid"
       );
     }
 
-    if (canonicalBuffer.byteLength === 0) {
-      throw new Error(
-        "canonicalizeGLBBones вернул пустой буфер"
-      );
-    }
-
-    setStatus(
-      `6/7 — Канонический GLB готов: ${(
-        canonicalBuffer.byteLength / 1024 / 1024
-      ).toFixed(2)} MB`
-    );
+    setStatus("4/8 — Parsing GLB…");
 
     const gltf =
-      await withTimeout(
+      await timeout(
         loader.parseAsync(
           canonicalBuffer,
           ""
         ),
         10000,
-        "GLTFLoader.parseAsync"
+        "GLTF parse"
       );
 
-    if (!gltf || !gltf.scene) {
+    if (!gltf?.scene) {
       throw new Error(
-        "GLTFLoader не вернул scene"
+        "GLTF scene missing"
       );
     }
 
     model = gltf.scene;
-
     scene.add(model);
 
     frameModel(model);
 
-    setStatus(
-      "7/7 — Проверяем скелет…"
-    );
+    setStatus("5/8 — Inspecting skeleton…");
 
     const report =
       inspectBones(model);
@@ -343,25 +400,41 @@ async function loadModel() {
 
     renderBoneReport(report);
 
-    if (report.canonicalMissing.length > 0) {
-      status.textContent =
-        `❌ Canonical joints: ${report.canonicalFound}/52`;
-
-      console.error(
-        "[AstraWay] Missing canonical joints:",
-        report.canonicalMissing
+    if (
+      report.canonicalFound !==
+      report.canonicalTotal
+    ) {
+      throw new Error(
+        `Canonical skeleton RED: ${report.canonicalFound}/${report.canonicalTotal}`
       );
+    }
+
+    setStatus(
+      "6/8 — Running Pose Gate…"
+    );
+
+    const pose =
+      runPoseGate(model);
+
+    if (!pose.pass) {
+      console.error(
+        "[AstraWay] POSE GATE FAILED",
+        pose
+      );
+
+      status.textContent =
+        `POSE GATE RED — ${pose.passCount}/${pose.total}`;
 
       return;
     }
 
-    status.textContent =
-      `GREEN — 52/52 canonical joints | logical: ${report.logicalFound}/22`;
-
     console.log(
-      "[AstraWay] Character Lab GREEN",
-      report
+      "[AstraWay] POSE GATE GREEN",
+      pose
     );
+
+    status.textContent =
+      `POSE GATE GREEN — ${pose.passCount}/${pose.total}`;
   } catch (error) {
     console.error(
       "[AstraWay] Character Lab ERROR",
@@ -369,7 +442,7 @@ async function loadModel() {
     );
 
     status.textContent =
-      `❌ ${error?.message || "Неизвестная ошибка"}`;
+      `❌ ${error.message}`;
   }
 }
 
