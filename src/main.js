@@ -57,9 +57,15 @@ scene.add(ground);
 const loader = new GLTFLoader();
 loader.setMeshoptDecoder(MeshoptDecoder);
 
-const MODEL_URL = "https://three.ws/avatars/xbot.glb";
+const MODEL_URL =
+  "https://threejs.org/examples/models/gltf/Xbot.glb";
 
 let model = null;
+
+function setStatus(message) {
+  status.textContent = message;
+  console.log(`[AstraWay] ${message}`);
+}
 
 function frameModel(root) {
   const box = new THREE.Box3().setFromObject(root);
@@ -67,8 +73,10 @@ function frameModel(root) {
   const center = box.getCenter(new THREE.Vector3());
 
   const maxSize = Math.max(size.x, size.y, size.z);
+
   const distance =
-    maxSize / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)));
+    maxSize /
+    (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)));
 
   camera.position.set(
     center.x,
@@ -82,44 +90,72 @@ function frameModel(root) {
 }
 
 async function loadModel() {
-  status.textContent = "Загружаем X Bot…";
+  try {
+    setStatus("1/5 — Загружаем X Bot…");
 
-  const response = await fetch(MODEL_URL);
+    const response = await fetch(MODEL_URL, {
+      cache: "no-store",
+    });
 
-  if (!response.ok) {
-    throw new Error(
-      `Не удалось загрузить X Bot: HTTP ${response.status}`
+    if (!response.ok) {
+      throw new Error(
+        `X Bot: HTTP ${response.status} ${response.statusText}`
+      );
+    }
+
+    setStatus("2/5 — Файл X Bot получен…");
+
+    const buffer = await response.arrayBuffer();
+
+    if (buffer.byteLength === 0) {
+      throw new Error("X Bot: получен пустой GLB");
+    }
+
+    setStatus(
+      `2/5 — GLB получен: ${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB`
     );
-  }
 
-  const buffer = await response.arrayBuffer();
+    setStatus("3/5 — Канонизируем скелет…");
 
-  status.textContent = "Канонизируем скелет…";
+    const canonicalBuffer = await canonicalizeGLBBones(buffer);
 
-  const canonicalBuffer = await canonicalizeGLBBones(buffer);
+    setStatus("4/5 — Парсим GLB через GLTFLoader…");
 
-  status.textContent = "Парсим GLB…";
+    const gltf = await loader.parseAsync(canonicalBuffer, "");
 
-  const gltf = await loader.parseAsync(canonicalBuffer, "");
+    if (!gltf.scene) {
+      throw new Error("GLTFLoader не вернул scene");
+    }
 
-  model = gltf.scene;
+    model = gltf.scene;
 
-  scene.add(model);
+    scene.add(model);
 
-  frameModel(model);
+    frameModel(model);
 
-  const report = inspectBones(model);
+    setStatus("5/5 — Проверяем скелет…");
 
-  renderBoneReport(report);
+    const report = inspectBones(model);
 
-  if (report.canonicalMissing.length > 0) {
+    renderBoneReport(report);
+
+    if (report.canonicalMissing.length > 0) {
+      status.textContent =
+        `❌ Canonical joints: ${report.canonicalFound}/52`;
+      console.error("Missing canonical joints:", report.canonicalMissing);
+      return;
+    }
+
     status.textContent =
-      `❌ Canonical joints: ${report.canonicalFound}/52`;
-    return;
-  }
+      `GREEN — 52/52 canonical joints | logical: ${report.logicalFound}/22`;
 
-  status.textContent =
-    `GREEN — 52/52 canonical joints | logical: ${report.logicalFound}/22`;
+    console.log("[AstraWay] Character Lab GREEN", report);
+  } catch (error) {
+    console.error("[AstraWay] Character Lab ERROR", error);
+
+    status.textContent =
+      `❌ ${error?.message || "Неизвестная ошибка"}`;
+  }
 }
 
 function animate() {
@@ -140,9 +176,6 @@ window.addEventListener("resize", () => {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 });
 
-loadModel().catch((error) => {
-  console.error(error);
-  status.textContent = `❌ ${error.message}`;
-});
+loadModel();
 
 animate();
