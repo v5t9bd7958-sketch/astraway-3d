@@ -1,8 +1,9 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
-import { CCDIKSolver } from "three/addons/animation/CCDIKSolver.js";
 import { canonicalizeGLBBones } from "@three-ws/retarget";
+
+import { CCDIKSolver } from "./animation/IKSolver.js";
 
 import {
   inspectBones,
@@ -14,8 +15,13 @@ import { BONE_MAP } from "./character/BoneMap.js";
 const canvas = document.querySelector("#viewer");
 const status = document.querySelector("#status");
 
-if (!canvas) throw new Error("Canvas #viewer не найден");
-if (!status) throw new Error("Элемент #status не найден");
+if (!canvas) {
+  throw new Error("Canvas #viewer не найден");
+}
+
+if (!status) {
+  throw new Error("Элемент #status не найден");
+}
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -93,6 +99,30 @@ const MODEL_URL =
 
 let model = null;
 
+/*
+ * ---------------------------------------------------------
+ * IK GATE STATE
+ * ---------------------------------------------------------
+ */
+
+let ikSolver = null;
+let ikTarget = null;
+let ikMarker = null;
+
+let ikFrames = 0;
+let ikGateFinished = false;
+
+const IK_TEST_FRAMES = 60;
+
+let ikInitialError = null;
+let ikInitialFootPosition = null;
+let ikTargetPosition = null;
+
+let ikBeforeBoneCount = null;
+
+let ikBoneIndices = null;
+let ikHierarchy = null;
+
 function setStatus(message) {
   status.textContent = message;
 
@@ -135,21 +165,25 @@ function toArrayBuffer(value) {
 }
 
 function frameModel(root) {
-  const box = new THREE.Box3().setFromObject(root);
+  const box =
+    new THREE.Box3().setFromObject(root);
 
-  const size = box.getSize(
-    new THREE.Vector3()
-  );
+  const size =
+    box.getSize(
+      new THREE.Vector3()
+    );
 
-  const center = box.getCenter(
-    new THREE.Vector3()
-  );
+  const center =
+    box.getCenter(
+      new THREE.Vector3()
+    );
 
-  const maxSize = Math.max(
-    size.x,
-    size.y,
-    size.z
-  );
+  const maxSize =
+    Math.max(
+      size.x,
+      size.y,
+      size.z
+    );
 
   const distance =
     maxSize /
@@ -170,7 +204,8 @@ function frameModel(root) {
 
   camera.lookAt(center);
 
-  ground.position.y = box.min.y;
+  ground.position.y =
+    box.min.y;
 }
 
 /*
@@ -205,16 +240,22 @@ function runPoseGate(root) {
 
   results.push({
     name: "BoneMap 22/22",
-    pass: missingLogical.length === 0,
+    pass:
+      missingLogical.length === 0,
     detail:
       missingLogical.length === 0
         ? "all logical bones found"
         : `missing: ${missingLogical.join(", ")}`,
   });
 
-  const thighL = find("thigh_L");
-  const shinL = find("shin_L");
-  const footL = find("foot_L");
+  const thighL =
+    find("thigh_L");
+
+  const shinL =
+    find("shin_L");
+
+  const footL =
+    find("foot_L");
 
   const legHierarchyPass =
     !!thighL &&
@@ -232,8 +273,11 @@ function runPoseGate(root) {
         : "hierarchy mismatch",
   });
 
-  const upperArm = find("upperArm_L");
-  const foreArm = find("foreArm_L");
+  const upperArm =
+    find("upperArm_L");
+
+  const foreArm =
+    find("foreArm_L");
 
   let propagationPass = false;
   let armDelta = 0;
@@ -241,9 +285,12 @@ function runPoseGate(root) {
   if (upperArm && foreArm) {
     root.updateMatrixWorld(true);
 
-    const before = new THREE.Vector3();
+    const before =
+      new THREE.Vector3();
 
-    foreArm.getWorldPosition(before);
+    foreArm.getWorldPosition(
+      before
+    );
 
     const original =
       upperArm.quaternion.clone();
@@ -254,9 +301,12 @@ function runPoseGate(root) {
 
     root.updateMatrixWorld(true);
 
-    const after = new THREE.Vector3();
+    const after =
+      new THREE.Vector3();
 
-    foreArm.getWorldPosition(after);
+    foreArm.getWorldPosition(
+      after
+    );
 
     armDelta =
       before.distanceTo(after);
@@ -298,11 +348,20 @@ function runPoseGate(root) {
         : "no SkinnedMesh",
   });
 
-  const spine01 = find("spine01");
-  const spine02 = find("spine02");
-  const chest = find("chest");
-  const neck = find("neck");
-  const head = find("head");
+  const spine01 =
+    find("spine01");
+
+  const spine02 =
+    find("spine02");
+
+  const chest =
+    find("chest");
+
+  const neck =
+    find("neck");
+
+  const head =
+    find("head");
 
   const spinePass =
     !!spine01 &&
@@ -360,8 +419,11 @@ function runControlledPoseTest(root) {
     );
   };
 
-  const upperArm = find("upperArm_L");
-  const foreArm = find("foreArm_L");
+  const upperArm =
+    find("upperArm_L");
+
+  const foreArm =
+    find("foreArm_L");
 
   let armPass = false;
   let armMove = 0;
@@ -428,9 +490,14 @@ function runControlledPoseTest(root) {
       `move=${armMove.toFixed(4)}, restoreError=${armRestoreError.toFixed(6)}`,
   });
 
-  const thigh = find("thigh_L");
-  const shin = find("shin_L");
-  const foot = find("foot_L");
+  const thigh =
+    find("thigh_L");
+
+  const shin =
+    find("shin_L");
+
+  const foot =
+    find("foot_L");
 
   let legPass = false;
   let legMove = 0;
@@ -497,9 +564,14 @@ function runControlledPoseTest(root) {
       `move=${legMove.toFixed(4)}, restoreError=${legRestoreError.toFixed(6)}`,
   });
 
-  const spine = find("spine01");
-  const chest = find("chest");
-  const head = find("head");
+  const spine =
+    find("spine01");
+
+  const chest =
+    find("chest");
+
+  const head =
+    find("head");
 
   let spineMutationPass = false;
   let headMove = 0;
@@ -571,7 +643,8 @@ function runControlledPoseTest(root) {
       (r) => r.pass
     ).length;
 
-  const total = results.length;
+  const total =
+    results.length;
 
   console.table(results);
 
@@ -586,83 +659,30 @@ function runControlledPoseTest(root) {
 
 /*
  * ---------------------------------------------------------
- * IK GATE — OFFICIAL THREE.JS CCDIKSOLVER
+ * IK GATE 7
+ *
+ * upf-gti/IK-threejs
+ *
+ * IMPORTANT:
+ *
+ * chain order:
+ *
+ * [ effector, parent, root ]
+ *
+ * therefore:
+ *
+ * [ foot, shin, thigh ]
+ *
+ * Target is Object3D.
+ *
+ * Skeleton is NOT modified.
+ * No target Bone.
+ * No bones.push().
+ * No constraints.
  * ---------------------------------------------------------
  */
 
-function createIKTarget(mesh, foot) {
-  const target =
-    new THREE.Bone();
-
-  target.name =
-    "AstraWay_IK_Target_LeftFoot";
-
-  const footWorld =
-    new THREE.Vector3();
-
-  foot.getWorldPosition(
-    footWorld
-  );
-
-  target.position.copy(
-    footWorld
-  );
-
-  target.position.x += 0.15;
-  target.position.y += 0.08;
-
-  scene.add(target);
-
-  /*
-   * CCDIKSolver works with bone indices.
-   * The target therefore has to be visible
-   * through the skeleton bone array.
-   */
-
-  mesh.skeleton.bones.push(
-    target
-  );
-
-  rootUpdate(mesh);
-
-  const marker =
-    new THREE.Mesh(
-      new THREE.SphereGeometry(
-        0.035,
-        12,
-        12
-      ),
-      new THREE.MeshBasicMaterial({
-        color: 0x33ff88,
-      })
-    );
-
-  marker.position.copy(
-    footWorld
-  );
-
-  marker.position.x += 0.15;
-  marker.position.y += 0.08;
-
-  scene.add(marker);
-
-  return {
-    bone: target,
-    marker,
-  };
-}
-
-function rootUpdate(mesh) {
-  mesh.updateMatrixWorld(true);
-
-  if (mesh.parent) {
-    mesh.parent.updateMatrixWorld(true);
-  }
-}
-
-function runIKGate(mesh) {
-  const results = [];
-
+function prepareIKGate(mesh) {
   const find = (logicalName) => {
     const canonicalName =
       BONE_MAP[logicalName];
@@ -676,26 +696,42 @@ function runIKGate(mesh) {
     );
   };
 
-  const thigh = find("thigh_L");
-  const shin = find("shin_L");
-  const foot = find("foot_L");
+  const thigh =
+    find("thigh_L");
+
+  const shin =
+    find("shin_L");
+
+  const foot =
+    find("foot_L");
 
   if (!thigh || !shin || !foot) {
-    return {
-      pass: false,
-      passCount: 0,
-      total: 1,
-      results: [{
-        name: "IK bones",
-        pass: false,
-        detail:
-          "thigh/shin/foot missing",
-      }],
-    };
+    throw new Error(
+      "IK bones missing: thigh/shin/foot"
+    );
+  }
+
+  const hierarchyPass =
+    shin.parent === thigh &&
+    foot.parent === shin;
+
+  if (!hierarchyPass) {
+    throw new Error(
+      "IK hierarchy RED: expected thigh → shin → foot"
+    );
+  }
+
+  const skeleton =
+    mesh.skeleton;
+
+  if (!skeleton) {
+    throw new Error(
+      "IK skeleton missing"
+    );
   }
 
   const bones =
-    mesh.skeleton.bones;
+    skeleton.bones;
 
   const thighIndex =
     bones.indexOf(thigh);
@@ -711,148 +747,393 @@ function runIKGate(mesh) {
     shinIndex < 0 ||
     footIndex < 0
   ) {
-    return {
-      pass: false,
-      passCount: 0,
-      total: 1,
-      results: [{
-        name: "IK bone indices",
-        pass: false,
-        detail:
-          `thigh=${thighIndex}, shin=${shinIndex}, foot=${footIndex}`,
-      }],
-    };
-  }
-
-  const targetData =
-    createIKTarget(
-      mesh,
-      foot
+    throw new Error(
+      `IK indices RED: thigh=${thighIndex}, shin=${shinIndex}, foot=${footIndex}`
     );
-
-  const target =
-    targetData.bone;
-
-  const targetIndex =
-    bones.indexOf(target);
-
-  if (targetIndex < 0) {
-    return {
-      pass: false,
-      passCount: 0,
-      total: 1,
-      results: [{
-        name: "IK target",
-        pass: false,
-        detail:
-          "target not found in skeleton.bones",
-      }],
-    };
   }
 
-  rootUpdate(mesh);
+  ikBoneIndices = {
+    thigh: thighIndex,
+    shin: shinIndex,
+    foot: footIndex,
+  };
 
-  const before =
+  ikHierarchy = {
+    thigh: thigh.name,
+    shin: shin.name,
+    foot: foot.name,
+    shinParent: shin.parent?.name,
+    footParent: foot.parent?.name,
+  };
+
+  ikBeforeBoneCount =
+    bones.length;
+
+  /*
+   * Target is a normal Object3D.
+   * It is deliberately NOT a Bone.
+   */
+
+  ikTarget =
+    new THREE.Object3D();
+
+  ikTarget.name =
+    "AstraWay_IK_Target_LeftFoot";
+
+  /*
+   * IMPORTANT:
+   *
+   * We first update the model FK/world matrices.
+   * Only then do we read the original foot position.
+   */
+
+  mesh.updateMatrixWorld(true);
+
+  const footWorld =
     new THREE.Vector3();
 
   foot.getWorldPosition(
-    before
+    footWorld
   );
 
-  const beforeError =
-    before.distanceTo(
-      targetData.marker.position
+  /*
+   * Small reachable displacement.
+   *
+   * We intentionally keep the target close to
+   * the original foot position so this first Gate
+   * tests solver operation rather than reachability.
+   */
+
+  ikTarget.position.copy(
+    footWorld
+  );
+
+  ikTarget.position.x += 0.15;
+  ikTarget.position.y += 0.05;
+
+  scene.add(ikTarget);
+
+  scene.updateMatrixWorld(true);
+
+  ikTarget.getWorldPosition(
+    ikTargetPosition =
+      new THREE.Vector3()
+  );
+
+  ikMarker =
+    new THREE.Mesh(
+      new THREE.SphereGeometry(
+        0.035,
+        12,
+        12
+      ),
+      new THREE.MeshBasicMaterial({
+        color: 0x33ff88,
+      })
     );
 
-  const iks = [
-    {
-      target: targetIndex,
-      effector: footIndex,
-
-      links: [
-        {
-          index: shinIndex,
-        },
-        {
-          index: thighIndex,
-        },
-      ],
-
-      iteration: 12,
-
-      minAngle: 0.01,
-
-      maxAngle:
-        Math.PI / 2,
-
-      blendFactor: 1,
-    },
-  ];
-
-  console.log(
-    "[AstraWay] IK configuration:",
-    {
-      targetIndex,
-      effector: footIndex,
-      shin: shinIndex,
-      thigh: thighIndex,
-      iks,
-    }
+  ikMarker.position.copy(
+    ikTargetPosition
   );
 
-  const ikSolver =
+  scene.add(ikMarker);
+
+  /*
+   * Initial error MUST be measured after
+   * updateMatrixWorld(true).
+   */
+
+  mesh.updateMatrixWorld(true);
+
+  const initialFoot =
+    new THREE.Vector3();
+
+  foot.getWorldPosition(
+    initialFoot
+  );
+
+  ikInitialFootPosition =
+    initialFoot.clone();
+
+  ikInitialError =
+    initialFoot.distanceTo(
+      ikTargetPosition
+    );
+
+  /*
+   * Create solver against the ORIGINAL Skeleton.
+   *
+   * No skeleton.bones modification.
+   */
+
+  ikSolver =
     new CCDIKSolver(
-      mesh,
-      iks
+      skeleton
     );
 
-  ikSolver.update();
+  /*
+   * Gate 7 intentionally uses:
+   *
+   * constraints = [null, null, null]
+   *
+   * No anatomical restrictions yet.
+   */
 
-  rootUpdate(mesh);
-
-  const after =
-    new THREE.Vector3();
-
-  foot.getWorldPosition(
-    after
+  ikSolver.createChain(
+    [
+      footIndex,
+      shinIndex,
+      thighIndex,
+    ],
+    [
+      null,
+      null,
+      null,
+    ],
+    ikTarget,
+    "AstraWay_LeftLeg_Gate7"
   );
 
-  const afterError =
-    after.distanceTo(
-      targetData.marker.position
-    );
-
-  const moved =
-    before.distanceTo(after);
-
-  const pass =
-    moved > 0.0001 &&
-    afterError < beforeError;
-
-  results.push({
-    name:
-      "CCDIKSolver foot movement",
-
-    pass,
-
-    detail:
-      `moved=${moved.toFixed(4)}, error ${beforeError.toFixed(4)} → ${afterError.toFixed(4)}`,
+  ikSolver.setConfiguration({
+    iterations: 1,
+    thresholdTargetSq: 0.00000001,
+    thresholdIterSqDist: 0.00000001,
   });
 
-  console.table(results);
-
-  return {
-    results,
-    passCount:
-      pass ? 1 : 0,
-    total: 1,
-    pass,
-  };
+  console.log(
+    "[AstraWay] IK GATE 7 prepared:",
+    {
+      chain: [
+        footIndex,
+        shinIndex,
+        thighIndex,
+      ],
+      target: ikTarget.name,
+      targetPosition:
+        ikTargetPosition.toArray(),
+      initialFoot:
+        initialFoot.toArray(),
+      initialError:
+        ikInitialError,
+      boneCount:
+        ikBeforeBoneCount,
+      hierarchy:
+        ikHierarchy,
+    }
+  );
 }
 
 /*
  * ---------------------------------------------------------
- * LOAD
+ * IK GATE 7 FRAME STEP
+ * ---------------------------------------------------------
+ */
+
+function updateIKGate() {
+  if (
+    !ikSolver ||
+    !model ||
+    ikGateFinished
+  ) {
+    return;
+  }
+
+  /*
+   * Do not rotate the model while testing IK.
+   *
+   * This is intentionally a static diagnostic.
+   */
+
+  ikSolver.update();
+
+  /*
+   * The solver modifies bone local transforms.
+   * Force FK/world matrices before measuring.
+   */
+
+  model.updateMatrixWorld(true);
+
+  ikFrames++;
+
+  if (
+    ikFrames < IK_TEST_FRAMES
+  ) {
+    setStatus(
+      `9/10 — IK Gate 7 running ${ikFrames}/${IK_TEST_FRAMES}`
+    );
+
+    return;
+  }
+
+  finishIKGate();
+}
+
+/*
+ * ---------------------------------------------------------
+ * IK GATE 7 FINAL DIAGNOSTIC
+ * ---------------------------------------------------------
+ */
+
+function finishIKGate() {
+  if (ikGateFinished) {
+    return;
+  }
+
+  ikGateFinished = true;
+
+  const foot =
+    model.getObjectByName(
+      BONE_MAP.foot_L
+    );
+
+  if (!foot) {
+    status.textContent =
+      "IK GATE RED — foot disappeared";
+
+    return;
+  }
+
+  /*
+   * Final FK/world update before measurement.
+   */
+
+  model.updateMatrixWorld(true);
+
+  const finalFoot =
+    new THREE.Vector3();
+
+  foot.getWorldPosition(
+    finalFoot
+  );
+
+  const finalError =
+    finalFoot.distanceTo(
+      ikTargetPosition
+    );
+
+  const improvement =
+    ikInitialError -
+    finalError;
+
+  const moved =
+    finalFoot.distanceTo(
+      ikInitialFootPosition
+    );
+
+  const boneCountAfter =
+    model.skeleton.bones.length;
+
+  const boneCountPass =
+    boneCountAfter ===
+    ikBeforeBoneCount;
+
+  const movedPass =
+    moved > 0.0001;
+
+  const improvementPass =
+    improvement > 0.0001;
+
+  /*
+   * Gate 7 is deliberately about solver movement,
+   * not perfect final accuracy.
+   *
+   * A later Gate will define exact tolerances.
+   */
+
+  const pass =
+    movedPass &&
+    improvementPass &&
+    boneCountPass;
+
+  const diagnostics = {
+    initialError:
+      ikInitialError,
+
+    finalError,
+
+    improvement,
+
+    moved,
+
+    targetPosition:
+      ikTargetPosition.toArray(),
+
+    initialFoot:
+      ikInitialFootPosition.toArray(),
+
+    finalFoot:
+      finalFoot.toArray(),
+
+    frames:
+      ikFrames,
+
+    boneIndices:
+      ikBoneIndices,
+
+    hierarchy:
+      ikHierarchy,
+
+    boneCountBefore:
+      ikBeforeBoneCount,
+
+    boneCountAfter,
+
+    boneCountPass,
+  };
+
+  console.table(
+    diagnostics
+  );
+
+  console.log(
+    "[AstraWay] IK GATE 7 diagnostics:",
+    diagnostics
+  );
+
+  if (!pass) {
+    const reasons = [];
+
+    if (!movedPass) {
+      reasons.push(
+        "foot did not move"
+      );
+    }
+
+    if (!improvementPass) {
+      reasons.push(
+        "error did not improve"
+      );
+    }
+
+    if (!boneCountPass) {
+      reasons.push(
+        `bone count changed ${ikBeforeBoneCount} → ${boneCountAfter}`
+      );
+    }
+
+    status.textContent =
+      `IK GATE RED — ${reasons.join(" | ")}`;
+
+    console.error(
+      "[AstraWay] IK GATE 7 RED",
+      diagnostics
+    );
+
+    return;
+  }
+
+  status.textContent =
+    `IK GATE GREEN — foot moved ${moved.toFixed(4)} | error ${ikInitialError.toFixed(4)} → ${finalError.toFixed(4)} | improvement ${improvement.toFixed(4)}`;
+
+  console.log(
+    "[AstraWay] IK GATE 7 GREEN",
+    diagnostics
+  );
+}
+
+/*
+ * ---------------------------------------------------------
+ * LOAD MODEL
  * ---------------------------------------------------------
  */
 
@@ -905,7 +1186,9 @@ async function loadModel() {
       );
 
     const canonicalBuffer =
-      toArrayBuffer(canonical);
+      toArrayBuffer(
+        canonical
+      );
 
     if (!canonicalBuffer) {
       throw new Error(
@@ -933,7 +1216,8 @@ async function loadModel() {
       );
     }
 
-    model = gltf.scene;
+    model =
+      gltf.scene;
 
     scene.add(model);
 
@@ -951,7 +1235,9 @@ async function loadModel() {
       report
     );
 
-    renderBoneReport(report);
+    renderBoneReport(
+      report
+    );
 
     if (
       report.canonicalFound !==
@@ -990,7 +1276,9 @@ async function loadModel() {
     );
 
     const controlled =
-      runControlledPoseTest(model);
+      runControlledPoseTest(
+        model
+      );
 
     if (!controlled.pass) {
       console.error(
@@ -1010,36 +1298,24 @@ async function loadModel() {
     );
 
     setStatus(
-      "9/10 — Running IK Gate…"
+      "9/10 — Preparing IK Gate 7…"
     );
 
-    const ik =
-      runIKGate(
-        model
-      );
-
-    if (!ik.pass) {
-      console.error(
-        "[AstraWay] IK GATE FAILED",
-        ik
-      );
-
-      status.textContent =
-        `IK GATE RED — ${ik.passCount}/${ik.total} — ${ik.results.map((r) => r.detail).join(" | ")}`;
-
-      return;
-    }
-
-    console.log(
-      "[AstraWay] IK GATE GREEN",
-      ik
+    prepareIKGate(
+      model
     );
 
-    status.textContent =
-      `IK GATE GREEN — CCDIKSolver moved foot | ${ik.results[0].detail}`;
+    /*
+     * IMPORTANT:
+     *
+     * No model rotation starts here.
+     *
+     * animate() deliberately does NOT modify
+     * model.rotation.y.
+     */
 
-    console.log(
-      "[AstraWay] FINAL IK GATE GREEN"
+    setStatus(
+      "9/10 — IK Gate 7 running…"
     );
   } catch (error) {
     console.error(
@@ -1063,9 +1339,15 @@ function animate() {
     animate
   );
 
-  if (model) {
-    model.rotation.y += 0.0025;
-  }
+  /*
+   * NO MODEL ROTATION.
+   *
+   * Gate 7 requires a static model so that
+   * world-space target and foot measurements
+   * are not contaminated by external rotation.
+   */
+
+  updateIKGate();
 
   renderer.render(
     scene,
@@ -1097,4 +1379,5 @@ window.addEventListener(
 );
 
 loadModel();
+
 animate();
