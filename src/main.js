@@ -101,6 +101,29 @@ let model = null;
 
 /*
  * ---------------------------------------------------------
+ * AUTHORITATIVE SKINNED MESH / SKELETON
+ * ---------------------------------------------------------
+ *
+ * GLTF root (model) does NOT own the Skeleton.
+ *
+ * The Skeleton belongs to the actual SkinnedMesh.
+ *
+ * Ownership:
+ *
+ * GLTF Group
+ *   └── SkinnedMesh
+ *        └── Skeleton
+ *             └── bones[]
+ *
+ * We keep this reference explicitly so that every
+ * animation / IK operation uses the real Skeleton owner.
+ */
+
+let skinnedMesh = null;
+let skeleton = null;
+
+/*
+ * ---------------------------------------------------------
  * IK GATE STATE
  * ---------------------------------------------------------
  */
@@ -328,22 +351,22 @@ function runPoseGate(root) {
       `child world delta=${armDelta.toFixed(4)}`,
   });
 
-  let skinnedMesh = null;
+  let poseSkinnedMesh = null;
 
   root.traverse((object) => {
     if (
       object.isSkinnedMesh &&
-      !skinnedMesh
+      !poseSkinnedMesh
     ) {
-      skinnedMesh = object;
+      poseSkinnedMesh = object;
     }
   });
 
   results.push({
     name: "SkinnedMesh",
-    pass: !!skinnedMesh,
+    pass: !!poseSkinnedMesh,
     detail:
-      skinnedMesh
+      poseSkinnedMesh
         ? "skin found"
         : "no SkinnedMesh",
   });
@@ -682,7 +705,7 @@ function runControlledPoseTest(root) {
  * ---------------------------------------------------------
  */
 
-function prepareIKGate(mesh) {
+function prepareIKGate(modelRoot, skin) {
   const find = (logicalName) => {
     const canonicalName =
       BONE_MAP[logicalName];
@@ -691,10 +714,36 @@ function prepareIKGate(mesh) {
       return null;
     }
 
-    return mesh.getObjectByName(
+    return modelRoot.getObjectByName(
       canonicalName
     );
   };
+
+  if (!skin) {
+    throw new Error(
+      "IK SkinnedMesh missing"
+    );
+  }
+
+  if (!skin.skeleton) {
+    throw new Error(
+      "IK Skeleton missing on SkinnedMesh"
+    );
+  }
+
+  /*
+   * AUTHORITATIVE SKELETON OWNER:
+   *
+   * SkinnedMesh owns Skeleton.
+   *
+   * Never read modelRoot.skeleton.
+   */
+
+  const activeSkeleton =
+    skin.skeleton;
+
+  skeleton =
+    activeSkeleton;
 
   const thigh =
     find("thigh_L");
@@ -721,17 +770,8 @@ function prepareIKGate(mesh) {
     );
   }
 
-  const skeleton =
-    mesh.skeleton;
-
-  if (!skeleton) {
-    throw new Error(
-      "IK skeleton missing"
-    );
-  }
-
   const bones =
-    skeleton.bones;
+    activeSkeleton.bones;
 
   const thighIndex =
     bones.indexOf(thigh);
@@ -781,13 +821,11 @@ function prepareIKGate(mesh) {
     "AstraWay_IK_Target_LeftFoot";
 
   /*
-   * IMPORTANT:
-   *
-   * We first update the model FK/world matrices.
-   * Only then do we read the original foot position.
+   * Update FK/world matrices BEFORE reading
+   * the original foot position.
    */
 
-  mesh.updateMatrixWorld(true);
+  modelRoot.updateMatrixWorld(true);
 
   const footWorld =
     new THREE.Vector3();
@@ -799,9 +837,8 @@ function prepareIKGate(mesh) {
   /*
    * Small reachable displacement.
    *
-   * We intentionally keep the target close to
-   * the original foot position so this first Gate
-   * tests solver operation rather than reachability.
+   * Gate 7 tests solver operation rather than
+   * extreme reachability.
    */
 
   ikTarget.position.copy(
@@ -843,7 +880,7 @@ function prepareIKGate(mesh) {
    * updateMatrixWorld(true).
    */
 
-  mesh.updateMatrixWorld(true);
+  modelRoot.updateMatrixWorld(true);
 
   const initialFoot =
     new THREE.Vector3();
@@ -861,14 +898,15 @@ function prepareIKGate(mesh) {
     );
 
   /*
-   * Create solver against the ORIGINAL Skeleton.
+   * Create solver against the ORIGINAL
+   * SkinnedMesh-owned Skeleton.
    *
    * No skeleton.bones modification.
    */
 
   ikSolver =
     new CCDIKSolver(
-      skeleton
+      activeSkeleton
     );
 
   /*
@@ -919,6 +957,10 @@ function prepareIKGate(mesh) {
         ikBeforeBoneCount,
       hierarchy:
         ikHierarchy,
+      skinnedMesh:
+        skin.name,
+      skeletonBones:
+        activeSkeleton.bones.length,
     }
   );
 }
@@ -939,15 +981,15 @@ function updateIKGate() {
   }
 
   /*
-   * Do not rotate the model while testing IK.
+   * No model rotation during Gate 7.
    *
-   * This is intentionally a static diagnostic.
+   * This keeps the diagnostic deterministic.
    */
 
   ikSolver.update();
 
   /*
-   * The solver modifies bone local transforms.
+   * Solver modifies bone local transforms.
    * Force FK/world matrices before measuring.
    */
 
@@ -994,6 +1036,21 @@ function finishIKGate() {
   }
 
   /*
+   * The Skeleton belongs to SkinnedMesh.
+   *
+   * Do NOT use:
+   *
+   * model.skeleton
+   */
+
+  if (!skinnedMesh || !skinnedMesh.skeleton) {
+    status.textContent =
+      "IK GATE RED — SkinnedMesh/Skeleton disappeared";
+
+    return;
+  }
+
+  /*
    * Final FK/world update before measurement.
    */
 
@@ -1021,7 +1078,7 @@ function finishIKGate() {
     );
 
   const boneCountAfter =
-    model.skeleton.bones.length;
+    skinnedMesh.skeleton.bones.length;
 
   const boneCountPass =
     boneCountAfter ===
@@ -1034,10 +1091,10 @@ function finishIKGate() {
     improvement > 0.0001;
 
   /*
-   * Gate 7 is deliberately about solver movement,
-   * not perfect final accuracy.
+   * Gate 7 checks that the solver actually
+   * modifies the chain in the correct direction.
    *
-   * A later Gate will define exact tolerances.
+   * It does NOT yet require perfect IK accuracy.
    */
 
   const pass =
@@ -1072,6 +1129,9 @@ function finishIKGate() {
 
     hierarchy:
       ikHierarchy,
+
+    skinnedMesh:
+      skinnedMesh.name,
 
     boneCountBefore:
       ikBeforeBoneCount,
@@ -1219,6 +1279,48 @@ async function loadModel() {
     model =
       gltf.scene;
 
+    /*
+     * Find the REAL SkinnedMesh once.
+     *
+     * This is the owner of Skeleton.
+     */
+
+    skinnedMesh = null;
+
+    model.traverse((object) => {
+      if (
+        object.isSkinnedMesh &&
+        !skinnedMesh
+      ) {
+        skinnedMesh = object;
+      }
+    });
+
+    if (!skinnedMesh) {
+      throw new Error(
+        "SkinnedMesh not found"
+      );
+    }
+
+    if (!skinnedMesh.skeleton) {
+      throw new Error(
+        "Skeleton not found on SkinnedMesh"
+      );
+    }
+
+    skeleton =
+      skinnedMesh.skeleton;
+
+    console.log(
+      "[AstraWay] AUTHORITATIVE SKINNED MESH:",
+      {
+        name:
+          skinnedMesh.name,
+        boneCount:
+          skeleton.bones.length,
+      }
+    );
+
     scene.add(model);
 
     frameModel(model);
@@ -1302,7 +1404,8 @@ async function loadModel() {
     );
 
     prepareIKGate(
-      model
+      model,
+      skinnedMesh
     );
 
     /*
