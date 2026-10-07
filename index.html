@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>AstraWay 3D — Character Lab</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #090b10;
+        color: #e8edf5;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      #app {
+        width: 100%;
+        height: 100%;
+      }
+
+      #info {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        max-width: calc(100vw - 24px);
+        padding: 10px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px;
+        background: rgba(9, 11, 16, 0.82);
+        backdrop-filter: blur(8px);
+        font-size: 13px;
+        line-height: 1.45;
+        pointer-events: none;
+      }
+
+      #status {
+        margin-top: 4px;
+        font-weight: 600;
+      }
+
+      #viewer {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="app">
+      <canvas id="viewer"></canvas>
+
+      <div id="info">
+        <div><strong>AstraWay 3D — Character Lab</strong></div>
+        <div id="status">Загрузка X Bot…</div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
