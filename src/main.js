@@ -4,45 +4,31 @@ import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { canonicalizeGLBBones } from "@three-ws/retarget";
 
 import { CCDIKSolver } from "./animation/IKSolver.js";
-
 import {
   inspectBones,
   renderBoneReport,
 } from "./bone-inspector.js";
 
 import { BONE_MAP } from "./character/BoneMap.js";
-
 import { runClosedChainViability } from "./solver-bakeoff/ClosedChainViability.js";
+import { runClosedChainMultiEffector } from "./solver-bakeoff/ClosedChainMultiEffector.js";
 
 const canvas = document.querySelector("#viewer");
 const status = document.querySelector("#status");
 
-if (!canvas) {
-  throw new Error("Canvas #viewer не найден");
-}
-
-if (!status) {
-  throw new Error("Элемент #status не найден");
-}
+if (!canvas) throw new Error("Canvas #viewer не найден");
+if (!status) throw new Error("Элемент #status не найден");
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
   antialias: true,
 });
 
-renderer.setPixelRatio(
-  Math.min(window.devicePixelRatio, 2)
-);
-
-renderer.setSize(
-  window.innerWidth,
-  window.innerHeight
-);
-
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const scene = new THREE.Scene();
-
 scene.background = new THREE.Color(0x090b10);
 
 const camera = new THREE.PerspectiveCamera(
@@ -68,7 +54,6 @@ const keyLight = new THREE.DirectionalLight(
 );
 
 keyLight.position.set(2, 4, 3);
-
 scene.add(keyLight);
 
 const fillLight = new THREE.DirectionalLight(
@@ -77,7 +62,6 @@ const fillLight = new THREE.DirectionalLight(
 );
 
 fillLight.position.set(-3, 2, -2);
-
 scene.add(fillLight);
 
 const ground = new THREE.Mesh(
@@ -89,18 +73,15 @@ const ground = new THREE.Mesh(
 );
 
 ground.rotation.x = -Math.PI / 2;
-
 scene.add(ground);
 
 const loader = new GLTFLoader();
-
 loader.setMeshoptDecoder(MeshoptDecoder);
 
 const MODEL_URL =
   `${import.meta.env.BASE_URL}models/Xbot.glb`;
 
 let model = null;
-
 let skinnedMesh = null;
 let skeleton = null;
 
@@ -109,37 +90,25 @@ let ikTarget = null;
 let ikMarker = null;
 
 let ikFrames = 0;
-let ikGateFinished = false;
+let ikFinished = false;
+
+let ikInitialError = 0;
+let ikInitialFoot = null;
+let ikTargetPosition = null;
 
 const IK_TEST_FRAMES = 60;
 
-let ikInitialError = null;
-let ikInitialFootPosition = null;
-let ikTargetPosition = null;
-
-let ikBeforeBoneCount = null;
-
-let ikBoneIndices = null;
-let ikHierarchy = null;
-
 function setStatus(message) {
   status.textContent = message;
-
   console.log(`[AstraWay] ${message}`);
 }
 
 function timeout(promise, ms, name) {
   return Promise.race([
     promise,
-
     new Promise((_, reject) => {
       setTimeout(
-        () =>
-          reject(
-            new Error(
-              `${name}: timeout ${ms / 1000}s`
-            )
-          ),
+        () => reject(new Error(`${name}: timeout ${ms / 1000}s`)),
         ms
       );
     }),
@@ -147,9 +116,7 @@ function timeout(promise, ms, name) {
 }
 
 function toArrayBuffer(value) {
-  if (value instanceof ArrayBuffer) {
-    return value;
-  }
+  if (value instanceof ArrayBuffer) return value;
 
   if (ArrayBuffer.isView(value)) {
     return value.buffer.slice(
@@ -163,26 +130,23 @@ function toArrayBuffer(value) {
     : null;
 }
 
+function findBone(root, logicalName) {
+  const canonicalName = BONE_MAP[logicalName];
+  return canonicalName
+    ? root.getObjectByName(canonicalName)
+    : null;
+}
+
 function frameModel(root) {
-  const box =
-    new THREE.Box3().setFromObject(root);
+  const box = new THREE.Box3().setFromObject(root);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
 
-  const size =
-    box.getSize(
-      new THREE.Vector3()
-    );
-
-  const center =
-    box.getCenter(
-      new THREE.Vector3()
-    );
-
-  const maxSize =
-    Math.max(
-      size.x,
-      size.y,
-      size.z
-    );
+  const maxSize = Math.max(
+    size.x,
+    size.y,
+    size.z
+  );
 
   const distance =
     maxSize /
@@ -202,91 +166,50 @@ function frameModel(root) {
   );
 
   camera.lookAt(center);
-
-  ground.position.y =
-    box.min.y;
+  ground.position.y = box.min.y;
 }
 
+/* -------------------------------------------------------
+ * POSE GATE
+ * ----------------------------------------------------- */
+
 function runPoseGate(root) {
-  const results = [];
+  const checks = [];
 
-  const find = (logicalName) => {
-    const canonicalName =
-      BONE_MAP[logicalName];
+  const logicalNames = Object.keys(BONE_MAP);
 
-    if (!canonicalName) {
-      return null;
-    }
+  const missing = logicalNames.filter(
+    (name) => !findBone(root, name)
+  );
 
-    return root.getObjectByName(
-      canonicalName
-    );
-  };
+  checks.push(
+    missing.length === 0
+  );
 
-  const logicalNames =
-    Object.keys(BONE_MAP);
+  const thigh = findBone(root, "thigh_L");
+  const shin = findBone(root, "shin_L");
+  const foot = findBone(root, "foot_L");
 
-  const missingLogical =
-    logicalNames.filter(
-      (name) => !find(name)
-    );
+  checks.push(
+    !!thigh &&
+    !!shin &&
+    !!foot &&
+    shin.parent === thigh &&
+    foot.parent === shin
+  );
 
-  results.push({
-    name: "BoneMap 22/22",
-    pass:
-      missingLogical.length === 0,
-    detail:
-      missingLogical.length === 0
-        ? "all logical bones found"
-        : `missing: ${missingLogical.join(", ")}`,
-  });
+  const upperArm = findBone(root, "upperArm_L");
+  const foreArm = findBone(root, "foreArm_L");
 
-  const thighL =
-    find("thigh_L");
-
-  const shinL =
-    find("shin_L");
-
-  const footL =
-    find("foot_L");
-
-  const legHierarchyPass =
-    !!thighL &&
-    !!shinL &&
-    !!footL &&
-    shinL.parent === thighL &&
-    footL.parent === shinL;
-
-  results.push({
-    name: "Leg hierarchy",
-    pass: legHierarchyPass,
-    detail:
-      legHierarchyPass
-        ? "thigh → shin → foot"
-        : "hierarchy mismatch",
-  });
-
-  const upperArm =
-    find("upperArm_L");
-
-  const foreArm =
-    find("foreArm_L");
-
-  let propagationPass = false;
-  let armDelta = 0;
+  let armPropagation = false;
 
   if (upperArm && foreArm) {
     root.updateMatrixWorld(true);
 
-    const before =
-      new THREE.Vector3();
+    const before = new THREE.Vector3();
+    foreArm.getWorldPosition(before);
 
-    foreArm.getWorldPosition(
-      before
-    );
-
-    const original =
-      upperArm.quaternion.clone();
+    const original = upperArm.quaternion.clone();
 
     upperArm.rotateZ(
       THREE.MathUtils.degToRad(30)
@@ -294,69 +217,30 @@ function runPoseGate(root) {
 
     root.updateMatrixWorld(true);
 
-    const after =
-      new THREE.Vector3();
+    const after = new THREE.Vector3();
+    foreArm.getWorldPosition(after);
 
-    foreArm.getWorldPosition(
-      after
-    );
-
-    armDelta =
-      before.distanceTo(after);
-
-    upperArm.quaternion.copy(
-      original
-    );
-
+    upperArm.quaternion.copy(original);
     root.updateMatrixWorld(true);
 
-    propagationPass =
-      armDelta > 0.001;
+    armPropagation =
+      before.distanceTo(after) > 0.001;
   }
 
-  results.push({
-    name: "Quaternion propagation",
-    pass: propagationPass,
-    detail:
-      `child world delta=${armDelta.toFixed(4)}`,
-  });
+  checks.push(armPropagation);
 
-  let poseSkinnedMesh = null;
+  checks.push(!!root.getObjectByProperty(
+    "isSkinnedMesh",
+    true
+  ));
 
-  root.traverse((object) => {
-    if (
-      object.isSkinnedMesh &&
-      !poseSkinnedMesh
-    ) {
-      poseSkinnedMesh = object;
-    }
-  });
+  const spine01 = findBone(root, "spine01");
+  const spine02 = findBone(root, "spine02");
+  const chest = findBone(root, "chest");
+  const neck = findBone(root, "neck");
+  const head = findBone(root, "head");
 
-  results.push({
-    name: "SkinnedMesh",
-    pass: !!poseSkinnedMesh,
-    detail:
-      poseSkinnedMesh
-        ? "skin found"
-        : "no SkinnedMesh",
-  });
-
-  const spine01 =
-    find("spine01");
-
-  const spine02 =
-    find("spine02");
-
-  const chest =
-    find("chest");
-
-  const neck =
-    find("neck");
-
-  const head =
-    find("head");
-
-  const spinePass =
+  checks.push(
     !!spine01 &&
     !!spine02 &&
     !!chest &&
@@ -365,423 +249,171 @@ function runPoseGate(root) {
     spine02.parent === spine01 &&
     chest.parent === spine02 &&
     neck.parent === chest &&
-    head.parent === neck;
+    head.parent === neck
+  );
 
-  results.push({
-    name: "Spine hierarchy",
-    pass: spinePass,
-    detail:
-      spinePass
-        ? "spine → chest → neck → head"
-        : "spine hierarchy mismatch",
-  });
-
-  const passCount =
-    results.filter(
-      (r) => r.pass
-    ).length;
+  const passed =
+    checks.filter(Boolean).length;
 
   return {
-    results,
-    passCount,
-    total: results.length,
-    pass:
-      passCount === results.length,
+    passed,
+    total: checks.length,
+    pass: passed === checks.length,
   };
 }
+
+/* -------------------------------------------------------
+ * CONTROLLED POSE TEST
+ * ----------------------------------------------------- */
 
 function runControlledPoseTest(root) {
-  const results = [];
+  const tests = [];
 
-  const find = (logicalName) => {
-    const canonicalName =
-      BONE_MAP[logicalName];
+  const testBone = (
+    parent,
+    child,
+    degrees
+  ) => {
+    if (!parent || !child) return false;
 
-    if (!canonicalName) {
-      return null;
-    }
+    root.updateMatrixWorld(true);
 
-    return root.getObjectByName(
-      canonicalName
+    const before = new THREE.Vector3();
+    child.getWorldPosition(before);
+
+    const original = parent.quaternion.clone();
+
+    parent.rotateZ(
+      THREE.MathUtils.degToRad(degrees)
+    );
+
+    root.updateMatrixWorld(true);
+
+    const moved = new THREE.Vector3();
+    child.getWorldPosition(moved);
+
+    parent.quaternion.copy(original);
+    root.updateMatrixWorld(true);
+
+    const restored = new THREE.Vector3();
+    child.getWorldPosition(restored);
+
+    return (
+      before.distanceTo(moved) > 0.001 &&
+      before.distanceTo(restored) < 0.0001
     );
   };
 
-  const upperArm =
-    find("upperArm_L");
+  tests.push(
+    testBone(
+      findBone(root, "upperArm_L"),
+      findBone(root, "foreArm_L"),
+      25
+    )
+  );
 
-  const foreArm =
-    find("foreArm_L");
+  tests.push(
+    testBone(
+      findBone(root, "thigh_L"),
+      findBone(root, "foot_L"),
+      -18
+    )
+  );
 
-  let armPass = false;
-  let armMove = 0;
-  let armRestoreError = 0;
+  tests.push(
+    testBone(
+      findBone(root, "spine01"),
+      findBone(root, "head"),
+      12
+    )
+  );
 
-  if (upperArm && foreArm) {
-    root.updateMatrixWorld(true);
-
-    const originalRotation =
-      upperArm.quaternion.clone();
-
-    const originalChild =
-      new THREE.Vector3();
-
-    foreArm.getWorldPosition(
-      originalChild
-    );
-
-    upperArm.rotateZ(
-      THREE.MathUtils.degToRad(25)
-    );
-
-    root.updateMatrixWorld(true);
-
-    const movedChild =
-      new THREE.Vector3();
-
-    foreArm.getWorldPosition(
-      movedChild
-    );
-
-    armMove =
-      originalChild.distanceTo(
-        movedChild
-      );
-
-    upperArm.quaternion.copy(
-      originalRotation
-    );
-
-    root.updateMatrixWorld(true);
-
-    const restoredChild =
-      new THREE.Vector3();
-
-    foreArm.getWorldPosition(
-      restoredChild
-    );
-
-    armRestoreError =
-      originalChild.distanceTo(
-        restoredChild
-      );
-
-    armPass =
-      armMove > 0.001 &&
-      armRestoreError < 0.0001;
-  }
-
-  results.push({
-    name: "Arm mutation",
-    pass: armPass,
-    detail:
-      `move=${armMove.toFixed(4)}, restoreError=${armRestoreError.toFixed(6)}`,
-  });
-
-  const thigh =
-    find("thigh_L");
-
-  const shin =
-    find("shin_L");
-
-  const foot =
-    find("foot_L");
-
-  let legPass = false;
-  let legMove = 0;
-  let legRestoreError = 0;
-
-  if (thigh && shin && foot) {
-    root.updateMatrixWorld(true);
-
-    const originalRotation =
-      thigh.quaternion.clone();
-
-    const originalFoot =
-      new THREE.Vector3();
-
-    foot.getWorldPosition(
-      originalFoot
-    );
-
-    thigh.rotateZ(
-      THREE.MathUtils.degToRad(-18)
-    );
-
-    root.updateMatrixWorld(true);
-
-    const movedFoot =
-      new THREE.Vector3();
-
-    foot.getWorldPosition(
-      movedFoot
-    );
-
-    legMove =
-      originalFoot.distanceTo(
-        movedFoot
-      );
-
-    thigh.quaternion.copy(
-      originalRotation
-    );
-
-    root.updateMatrixWorld(true);
-
-    const restoredFoot =
-      new THREE.Vector3();
-
-    foot.getWorldPosition(
-      restoredFoot
-    );
-
-    legRestoreError =
-      originalFoot.distanceTo(
-        restoredFoot
-      );
-
-    legPass =
-      legMove > 0.001 &&
-      legRestoreError < 0.0001;
-  }
-
-  results.push({
-    name: "Leg mutation",
-    pass: legPass,
-    detail:
-      `move=${legMove.toFixed(4)}, restoreError=${legRestoreError.toFixed(6)}`,
-  });
-
-  const spine =
-    find("spine01");
-
-  const chest =
-    find("chest");
-
-  const head =
-    find("head");
-
-  let spineMutationPass = false;
-  let headMove = 0;
-  let headRestoreError = 0;
-
-  if (spine && chest && head) {
-    root.updateMatrixWorld(true);
-
-    const originalRotation =
-      spine.quaternion.clone();
-
-    const originalHead =
-      new THREE.Vector3();
-
-    head.getWorldPosition(
-      originalHead
-    );
-
-    spine.rotateZ(
-      THREE.MathUtils.degToRad(12)
-    );
-
-    root.updateMatrixWorld(true);
-
-    const movedHead =
-      new THREE.Vector3();
-
-    head.getWorldPosition(
-      movedHead
-    );
-
-    headMove =
-      originalHead.distanceTo(
-        movedHead
-      );
-
-    spine.quaternion.copy(
-      originalRotation
-    );
-
-    root.updateMatrixWorld(true);
-
-    const restoredHead =
-      new THREE.Vector3();
-
-    head.getWorldPosition(
-      restoredHead
-    );
-
-    headRestoreError =
-      originalHead.distanceTo(
-        restoredHead
-      );
-
-    spineMutationPass =
-      headMove > 0.001 &&
-      headRestoreError < 0.0001;
-  }
-
-  results.push({
-    name: "Spine mutation",
-    pass: spineMutationPass,
-    detail:
-      `move=${headMove.toFixed(4)}, restoreError=${headRestoreError.toFixed(6)}`,
-  });
-
-  const passCount =
-    results.filter(
-      (r) => r.pass
-    ).length;
-
-  const total =
-    results.length;
-
-  console.table(results);
+  const passed =
+    tests.filter(Boolean).length;
 
   return {
-    results,
-    passCount,
-    total,
-    pass:
-      passCount === total,
+    passed,
+    total: tests.length,
+    pass: passed === tests.length,
   };
 }
 
-function prepareIKGate(modelRoot, skin) {
-  const find = (logicalName) => {
-    const canonicalName =
-      BONE_MAP[logicalName];
+/* -------------------------------------------------------
+ * GATE 7 — THREE.JS CCD IK
+ * ----------------------------------------------------- */
 
-    if (!canonicalName) {
-      return null;
-    }
+function prepareIKGate(root, skin) {
+  const thigh = findBone(root, "thigh_L");
+  const shin = findBone(root, "shin_L");
+  const foot = findBone(root, "foot_L");
 
-    return modelRoot.getObjectByName(
-      canonicalName
-    );
-  };
+  if (!skin?.skeleton) {
+    throw new Error("IK Skeleton missing");
+  }
 
-  if (!skin) {
+  if (
+    !thigh ||
+    !shin ||
+    !foot ||
+    shin.parent !== thigh ||
+    foot.parent !== shin
+  ) {
     throw new Error(
-      "IK SkinnedMesh missing"
+      "IK hierarchy RED: thigh → shin → foot"
     );
   }
 
-  if (!skin.skeleton) {
-    throw new Error(
-      "IK Skeleton missing on SkinnedMesh"
-    );
-  }
-
-  const activeSkeleton =
-    skin.skeleton;
-
-  skeleton =
-    activeSkeleton;
-
-  const thigh =
-    find("thigh_L");
-
-  const shin =
-    find("shin_L");
-
-  const foot =
-    find("foot_L");
-
-  if (!thigh || !shin || !foot) {
-    throw new Error(
-      "IK bones missing: thigh/shin/foot"
-    );
-  }
-
-  const hierarchyPass =
-    shin.parent === thigh &&
-    foot.parent === shin;
-
-  if (!hierarchyPass) {
-    throw new Error(
-      "IK hierarchy RED: expected thigh → shin → foot"
-    );
-  }
-
-  const bones =
-    activeSkeleton.bones;
+  skeleton = skin.skeleton;
 
   const thighIndex =
-    bones.indexOf(thigh);
+    skeleton.bones.indexOf(thigh);
 
   const shinIndex =
-    bones.indexOf(shin);
+    skeleton.bones.indexOf(shin);
 
   const footIndex =
-    bones.indexOf(foot);
+    skeleton.bones.indexOf(foot);
 
   if (
     thighIndex < 0 ||
     shinIndex < 0 ||
     footIndex < 0
   ) {
-    throw new Error(
-      `IK indices RED: thigh=${thighIndex}, shin=${shinIndex}, foot=${footIndex}`
-    );
+    throw new Error("IK bone indices invalid");
   }
 
-  ikBoneIndices = {
-    thigh: thighIndex,
-    shin: shinIndex,
-    foot: footIndex,
-  };
+  root.updateMatrixWorld(true);
 
-  ikHierarchy = {
-    thigh: thigh.name,
-    shin: shin.name,
-    foot: foot.name,
-    shinParent: shin.parent?.name,
-    footParent: foot.parent?.name,
-  };
+  const footWorld = new THREE.Vector3();
+  foot.getWorldPosition(footWorld);
 
-  ikBeforeBoneCount =
-    bones.length;
+  ikTarget = new THREE.Object3D();
+  ikTarget.name = "AstraWay_IK_Target_LeftFoot";
 
-  ikTarget =
-    new THREE.Object3D();
-
-  ikTarget.name =
-    "AstraWay_IK_Target_LeftFoot";
-
-  modelRoot.updateMatrixWorld(true);
-
-  const footWorld =
-    new THREE.Vector3();
-
-  foot.getWorldPosition(
-    footWorld
-  );
-
-  ikTarget.position.copy(
-    footWorld
-  );
-
+  ikTarget.position.copy(footWorld);
   ikTarget.position.x += 0.15;
   ikTarget.position.y += 0.05;
 
   scene.add(ikTarget);
 
+  root.updateMatrixWorld(true);
   scene.updateMatrixWorld(true);
 
-  ikTarget.getWorldPosition(
-    ikTargetPosition =
+  ikTargetPosition =
+    ikTarget.getWorldPosition(
       new THREE.Vector3()
-  );
-
-  ikMarker =
-    new THREE.Mesh(
-      new THREE.SphereGeometry(
-        0.035,
-        12,
-        12
-      ),
-      new THREE.MeshBasicMaterial({
-        color: 0x33ff88,
-      })
     );
+
+  ikMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(
+      0.035,
+      12,
+      12
+    ),
+    new THREE.MeshBasicMaterial({
+      color: 0x33ff88,
+    })
+  );
 
   ikMarker.position.copy(
     ikTargetPosition
@@ -789,27 +421,20 @@ function prepareIKGate(modelRoot, skin) {
 
   scene.add(ikMarker);
 
-  modelRoot.updateMatrixWorld(true);
+  root.updateMatrixWorld(true);
 
-  const initialFoot =
-    new THREE.Vector3();
-
-  foot.getWorldPosition(
-    initialFoot
-  );
-
-  ikInitialFootPosition =
-    initialFoot.clone();
+  ikInitialFoot =
+    foot.getWorldPosition(
+      new THREE.Vector3()
+    );
 
   ikInitialError =
-    initialFoot.distanceTo(
+    ikInitialFoot.distanceTo(
       ikTargetPosition
     );
 
   ikSolver =
-    new CCDIKSolver(
-      activeSkeleton
-    );
+    new CCDIKSolver(skeleton);
 
   ikSolver.createChain(
     [
@@ -831,39 +456,13 @@ function prepareIKGate(modelRoot, skin) {
     thresholdTargetSq: 0.00000001,
     thresholdIterSqDist: 0.00000001,
   });
-
-  console.log(
-    "[AstraWay] IK GATE 7 prepared:",
-    {
-      chain: [
-        footIndex,
-        shinIndex,
-        thighIndex,
-      ],
-      target: ikTarget.name,
-      targetPosition:
-        ikTargetPosition.toArray(),
-      initialFoot:
-        initialFoot.toArray(),
-      initialError:
-        ikInitialError,
-      boneCount:
-        ikBeforeBoneCount,
-      hierarchy:
-        ikHierarchy,
-      skinnedMesh:
-        skin.name,
-      skeletonBones:
-        activeSkeleton.bones.length,
-    }
-  );
 }
 
 function updateIKGate() {
   if (
     !ikSolver ||
     !model ||
-    ikGateFinished
+    ikFinished
   ) {
     return;
   }
@@ -874,188 +473,78 @@ function updateIKGate() {
 
   ikFrames++;
 
-  if (
-    ikFrames < IK_TEST_FRAMES
-  ) {
+  if (ikFrames < IK_TEST_FRAMES) {
     setStatus(
-      `9/10 — IK Gate 7 running ${ikFrames}/${IK_TEST_FRAMES}`
+      `9/10 — IK Gate 7 ${ikFrames}/${IK_TEST_FRAMES}`
     );
 
     return;
   }
 
-  finishIKGate();
-}
-
-function finishIKGate() {
-  if (ikGateFinished) {
-    return;
-  }
-
-  ikGateFinished = true;
+  ikFinished = true;
 
   const foot =
-    model.getObjectByName(
-      BONE_MAP.foot_L
-    );
+    findBone(model, "foot_L");
 
   if (!foot) {
-    status.textContent =
-      "IK GATE RED — foot disappeared";
-
-    return;
-  }
-
-  if (!skinnedMesh || !skinnedMesh.skeleton) {
-    status.textContent =
-      "IK GATE RED — SkinnedMesh/Skeleton disappeared";
-
+    setStatus("IK GATE RED — foot missing");
     return;
   }
 
   model.updateMatrixWorld(true);
 
   const finalFoot =
-    new THREE.Vector3();
-
-  foot.getWorldPosition(
-    finalFoot
-  );
+    foot.getWorldPosition(
+      new THREE.Vector3()
+    );
 
   const finalError =
     finalFoot.distanceTo(
       ikTargetPosition
     );
 
-  const improvement =
-    ikInitialError -
-    finalError;
-
   const moved =
     finalFoot.distanceTo(
-      ikInitialFootPosition
+      ikInitialFoot
     );
 
-  const boneCountAfter =
-    skinnedMesh.skeleton.bones.length;
-
-  const boneCountPass =
-    boneCountAfter ===
-    ikBeforeBoneCount;
-
-  const movedPass =
-    moved > 0.0001;
-
-  const improvementPass =
-    improvement > 0.0001;
+  const improvement =
+    ikInitialError - finalError;
 
   const pass =
-    movedPass &&
-    improvementPass &&
-    boneCountPass;
+    moved > 0.0001 &&
+    improvement > 0.0001;
 
-  const diagnostics = {
-    initialError:
-      ikInitialError,
-
-    finalError,
-
-    improvement,
-
-    moved,
-
-    targetPosition:
-      ikTargetPosition.toArray(),
-
-    initialFoot:
-      ikInitialFootPosition.toArray(),
-
-    finalFoot:
-      finalFoot.toArray(),
-
-    frames:
-      ikFrames,
-
-    boneIndices:
-      ikBoneIndices,
-
-    hierarchy:
-      ikHierarchy,
-
-    skinnedMesh:
-      skinnedMesh.name,
-
-    boneCountBefore:
-      ikBeforeBoneCount,
-
-    boneCountAfter,
-
-    boneCountPass,
-  };
-
-  console.table(
-    diagnostics
+  setStatus(
+    pass
+      ? `IK GATE GREEN — foot moved ${moved.toFixed(4)} | error ${ikInitialError.toFixed(4)} → ${finalError.toFixed(4)}`
+      : `IK GATE RED — moved ${moved.toFixed(4)} | error ${ikInitialError.toFixed(4)} → ${finalError.toFixed(4)}`
   );
 
   console.log(
-    "[AstraWay] IK GATE 7 diagnostics:",
-    diagnostics
-  );
-
-  if (!pass) {
-    const reasons = [];
-
-    if (!movedPass) {
-      reasons.push(
-        "foot did not move"
-      );
+    "[AstraWay] IK GATE 7",
+    {
+      initialError: ikInitialError,
+      finalError,
+      improvement,
+      moved,
     }
-
-    if (!improvementPass) {
-      reasons.push(
-        "error did not improve"
-      );
-    }
-
-    if (!boneCountPass) {
-      reasons.push(
-        `bone count changed ${ikBeforeBoneCount} → ${boneCountAfter}`
-      );
-    }
-
-    status.textContent =
-      `IK GATE RED — ${reasons.join(" | ")}`;
-
-    console.error(
-      "[AstraWay] IK GATE 7 RED",
-      diagnostics
-    );
-
-    return;
-  }
-
-  status.textContent =
-    `IK GATE GREEN — foot moved ${moved.toFixed(4)} | error ${ikInitialError.toFixed(4)} → ${finalError.toFixed(4)} | improvement ${improvement.toFixed(4)}`;
-
-  console.log(
-    "[AstraWay] IK GATE 7 GREEN",
-    diagnostics
   );
 }
 
+/* -------------------------------------------------------
+ * MODEL
+ * ----------------------------------------------------- */
+
 async function loadModel() {
   try {
-    setStatus(
-      "1/10 — Loading local XBot…"
-    );
+    setStatus("1/10 — Loading XBot…");
 
     const response =
       await timeout(
         fetch(
           MODEL_URL,
-          {
-            cache: "no-store",
-          }
+          { cache: "no-store" }
         ),
         10000,
         "Fetch XBot"
@@ -1074,27 +563,17 @@ async function loadModel() {
         "Read GLB"
       );
 
-    setStatus(
-      `2/10 — GLB ${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB`
-    );
-
-    setStatus(
-      "3/10 — Canonicalizing skeleton…"
-    );
+    setStatus("2/10 — Canonicalizing skeleton…");
 
     const canonical =
       await timeout(
-        canonicalizeGLBBones(
-          buffer
-        ),
+        canonicalizeGLBBones(buffer),
         10000,
         "Canonicalization"
       );
 
     const canonicalBuffer =
-      toArrayBuffer(
-        canonical
-      );
+      toArrayBuffer(canonical);
 
     if (!canonicalBuffer) {
       throw new Error(
@@ -1102,9 +581,7 @@ async function loadModel() {
       );
     }
 
-    setStatus(
-      "4/10 — Parsing GLB…"
-    );
+    setStatus("3/10 — Parsing GLB…");
 
     const gltf =
       await timeout(
@@ -1116,14 +593,7 @@ async function loadModel() {
         "GLTF parse"
       );
 
-    if (!gltf?.scene) {
-      throw new Error(
-        "GLTF scene missing"
-      );
-    }
-
-    model =
-      gltf.scene;
+    model = gltf.scene;
 
     skinnedMesh = null;
 
@@ -1136,50 +606,30 @@ async function loadModel() {
       }
     });
 
-    if (!skinnedMesh) {
+    if (!skinnedMesh?.skeleton) {
       throw new Error(
-        "SkinnedMesh not found"
-      );
-    }
-
-    if (!skinnedMesh.skeleton) {
-      throw new Error(
-        "Skeleton not found on SkinnedMesh"
+        "SkinnedMesh/Skeleton missing"
       );
     }
 
     skeleton =
       skinnedMesh.skeleton;
 
-    console.log(
-      "[AstraWay] AUTHORITATIVE SKINNED MESH:",
-      {
-        name:
-          skinnedMesh.name,
-        boneCount:
-          skeleton.bones.length,
-      }
-    );
-
     scene.add(model);
 
     frameModel(model);
 
-    setStatus(
-      "5/10 — Inspecting skeleton…"
-    );
+    setStatus("4/10 — Inspecting skeleton…");
 
     const report =
       inspectBones(model);
 
     console.log(
-      "[AstraWay] Bone report:",
+      "[AstraWay] Bone report",
       report
     );
 
-    renderBoneReport(
-      report
-    );
+    renderBoneReport(report);
 
     if (
       report.canonicalFound !==
@@ -1190,57 +640,32 @@ async function loadModel() {
       );
     }
 
-    setStatus(
-      "6/10 — Running Pose Gate…"
-    );
+    setStatus("5/10 — Pose Gate…");
 
     const pose =
       runPoseGate(model);
 
     if (!pose.pass) {
-      console.error(
-        "[AstraWay] POSE GATE FAILED",
-        pose
+      throw new Error(
+        `POSE GATE RED — ${pose.passed}/${pose.total}`
       );
-
-      status.textContent =
-        `POSE GATE RED — ${pose.passCount}/${pose.total}`;
-
-      return;
     }
 
     setStatus(
-      "7/10 — Pose Gate GREEN"
-    );
-
-    setStatus(
-      "8/10 — Running Controlled Pose Test…"
+      `6/10 — Pose Gate GREEN ${pose.passed}/${pose.total}`
     );
 
     const controlled =
-      runControlledPoseTest(
-        model
-      );
+      runControlledPoseTest(model);
 
     if (!controlled.pass) {
-      console.error(
-        "[AstraWay] CONTROLLED POSE FAILED",
-        controlled
+      throw new Error(
+        `CONTROLLED POSE RED — ${controlled.passed}/${controlled.total}`
       );
-
-      status.textContent =
-        `CONTROLLED POSE RED — ${controlled.passCount}/${controlled.total}`;
-
-      return;
     }
 
-    console.log(
-      "[AstraWay] CONTROLLED POSE GREEN",
-      controlled
-    );
-
     setStatus(
-      "9/10 — Preparing IK Gate 7…"
+      `7/10 — Controlled Pose GREEN ${controlled.passed}/${controlled.total}`
     );
 
     prepareIKGate(
@@ -1248,45 +673,59 @@ async function loadModel() {
       skinnedMesh
     );
 
-    /*
-     * -------------------------------------------------------
+    /* ---------------------------------------------------
      * GATE 8A
-     *
-     * Closed-Chain IK viability test.
-     *
-     * IMPORTANT:
-     *
-     * This is deliberately isolated from Gate 7.
-     *
-     * It builds its own temporary Link/Joint/Goal chain.
-     * It does NOT modify the live THREE.Skeleton.
-     *
-     * Run only with:
-     *
-     * ?gate8a=1
-     * -------------------------------------------------------
-     */
+     * ------------------------------------------------- */
 
-    const runGate8A =
+    const params =
       new URLSearchParams(
         window.location.search
-      ).get("gate8a") === "1";
-
-    if (runGate8A) {
-      setStatus(
-        "10/10 — Running Closed-Chain IK Gate 8A…"
       );
 
-      const gate8A =
+    if (
+      params.get("gate8a") === "1"
+    ) {
+      setStatus(
+        "10/10 — Running Gate 8A…"
+      );
+
+      const result =
         runClosedChainViability({
           skeleton,
           statusElement: status,
         });
 
       console.log(
-        "[AstraWay] CLOSED-CHAIN IK GATE 8A",
-        gate8A
+        "[AstraWay] GATE 8A",
+        result
       );
+
+      return;
+    }
+
+    /* ---------------------------------------------------
+     * GATE 8B
+     * ------------------------------------------------- */
+
+    if (
+      params.get("gate8b") === "1"
+    ) {
+      setStatus(
+        "10/10 — Running Gate 8B…"
+      );
+
+      const result =
+        runClosedChainMultiEffector({
+          skeleton,
+          statusElement: status,
+        });
+
+      console.log(
+        "[AstraWay] GATE 8B",
+        result
+      );
+
+      return;
     }
 
     setStatus(
@@ -1303,10 +742,12 @@ async function loadModel() {
   }
 }
 
+/* -------------------------------------------------------
+ * RENDER
+ * ----------------------------------------------------- */
+
 function animate() {
-  requestAnimationFrame(
-    animate
-  );
+  requestAnimationFrame(animate);
 
   updateIKGate();
 
@@ -1340,5 +781,4 @@ window.addEventListener(
 );
 
 loadModel();
-
 animate();
