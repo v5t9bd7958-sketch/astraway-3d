@@ -1247,6 +1247,15 @@ function updateBodyState(
     rightFoot?.phase ??
     "missing";
 
+  const diagnostics =
+    bodyStateBinder.getDiagnostics?.() ?? {};
+
+  const leftDiagnostics =
+    diagnostics.left ?? {};
+
+  const rightDiagnostics =
+    diagnostics.right ?? {};
+
   const support =
     bodyState.getSupportCount?.() ??
     0;
@@ -1282,6 +1291,38 @@ function updateBodyState(
     poseWriteResult?.applied ??
     0;
 
+  const formatDiagnostic =
+    (diagnostic) => {
+      const dy =
+        Number.isFinite(
+          diagnostic.dy
+        )
+          ? diagnostic.dy.toFixed(3)
+          : "INF";
+
+      const vy =
+        Number.isFinite(
+          diagnostic.verticalVelocity
+        )
+          ? diagnostic.verticalVelocity.toFixed(3)
+          : "INF";
+
+      const near =
+        diagnostic.nearGround
+          ? "1"
+          : "0";
+
+      const stable =
+        diagnostic.stableEnough
+          ? "1"
+          : "0";
+
+      return (
+        `dy ${dy} vy ${vy} ` +
+        `near ${near} stable ${stable}`
+      );
+    };
+
   setStatus(
     `DLS ${solverStatus.toUpperCase()} | ` +
     `tasks ${taskSet.enabledCount()} | ` +
@@ -1292,8 +1333,9 @@ function updateBodyState(
     `poseDelta ${poseDelta} | ` +
     `written ${written} | ` +
     `COM ${com.x.toFixed(2)},${com.y.toFixed(2)},${com.z.toFixed(2)} | ` +
-    `L ${leftPhase} | ` +
-    `R ${rightPhase} | ` +
+    `L ${leftPhase} ${formatDiagnostic(leftDiagnostics)} | ` +
+    `R ${rightPhase} ${formatDiagnostic(rightDiagnostics)} | ` +
+    `ground ${bodyStateBinder.groundY.toFixed(3)} | ` +
     `support ${support} | ` +
     `balance ${balanceText}`
   );
@@ -1304,6 +1346,27 @@ function updateBodyState(
     bodyStateFrames % 60 ===
       0
   ) {
+    console.log(
+      "[AstraWay] CONTACT DIAGNOSTICS",
+      {
+        frame:
+          bodyStateFrames,
+
+        groundY:
+          bodyStateBinder.groundY,
+
+        left:
+          {
+            ...leftDiagnostics,
+          },
+
+        right:
+          {
+            ...rightDiagnostics,
+          },
+      }
+    );
+
     console.log(
       "[AstraWay] PRODUCTION SOLVER",
       {
