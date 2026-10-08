@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@three-ws/retarget": "^0.1.2",
+    "closed-chain-ik": "github:gkjohnson/closed-chain-ik-js",
     "three": "^0.169.0"
   },
   "devDependencies": {
