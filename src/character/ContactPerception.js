@@ -197,7 +197,8 @@ export class ContactPerception {
      *   side,
      *   vertices: Uint32Array,
      *   count,
-     *   samples: Vector3[]
+     *   samples: Vector3[],
+     *   sampleVertices: Uint32Array
      * }
      *
      * The actual runtime probe positions are stored separately
@@ -232,8 +233,6 @@ export class ContactPerception {
      */
     this._vertexLocal = new THREE.Vector3();
     this._vertexWorld = new THREE.Vector3();
-
-    this._sample = new THREE.Vector3();
 
     this._clusterCenter = new THREE.Vector3();
 
@@ -309,9 +308,6 @@ export class ContactPerception {
       );
     }
 
-    /*
-     * Bone indices are resolved through the actual skeleton.
-     */
     const leftFootIndex = this._findBoneIndex(
       BONE_MAP.foot_L
     );
@@ -436,16 +432,6 @@ export class ContactPerception {
     return this;
   }
 
-  /**
-   * Update perception.
-   *
-   * Returns the stable evidence container:
-   *
-   * {
-   *   left,
-   *   right
-   * }
-   */
   update(time = 0) {
     if (!this._initialized) {
       this.initialize();
@@ -472,11 +458,6 @@ export class ContactPerception {
     return this._evidence;
   }
 
-  /**
-   * Get latest evidence.
-   *
-   * Does not perform a new measurement.
-   */
   getEvidence(logicalBone = null) {
     if (logicalBone === "foot_L") {
       return this._evidence.left;
@@ -489,25 +470,16 @@ export class ContactPerception {
     return this._evidence;
   }
 
-  /**
-   * True after initialize() succeeded.
-   */
   isInitialized() {
     return this._initialized;
   }
 
-  /**
-   * Return probe count for diagnostics.
-   */
   getProbeCount(logicalBone) {
     const set = this._probeSets.get(logicalBone);
 
     return set ? set.count : 0;
   }
 
-  /**
-   * Find skeleton bone index.
-   */
   _findBoneIndex(name) {
     const bones = this.skeleton.bones;
 
@@ -520,9 +492,6 @@ export class ContactPerception {
     return -1;
   }
 
-  /**
-   * Create a fixed probe set.
-   */
   _createProbeSet(logicalBone, side) {
     const samples = [];
 
@@ -536,27 +505,22 @@ export class ContactPerception {
 
       count: 0,
 
-      /*
-       * Candidate vertex indices retained after bake.
-       */
       vertices: new Uint32Array(64),
       vertexCount: 0,
 
       /*
-       * Runtime world-space probe positions.
+       * Exact source vertex for each runtime probe.
+       *
+       * Selected once during initialization, then re-skinned every
+       * frame so probe geometry follows the current character pose.
        */
+      sampleVertices: new Uint32Array(8),
+
       samples,
 
-      /*
-       * Scratch for baked candidate extents.
-       */
       minY: Infinity,
       maxY: -Infinity,
 
-      /*
-       * Reset baked/runtime probe state without reallocating
-       * the fixed buffers or Vector3 objects.
-       */
       reset() {
         this.count = 0;
         this.vertexCount = 0;
@@ -564,6 +528,7 @@ export class ContactPerception {
         this.maxY = -Infinity;
 
         this.vertices.fill(0);
+        this.sampleVertices.fill(0);
 
         for (let i = 0; i < this.samples.length; i++) {
           this.samples[i].set(0, 0, 0);
@@ -574,9 +539,6 @@ export class ContactPerception {
     };
   }
 
-  /**
-   * Create stable evidence object.
-   */
   _createEvidence(logicalBone, side) {
     return {
       valid: false,
@@ -599,17 +561,11 @@ export class ContactPerception {
       bone: logicalBone,
       side,
 
-      /*
-       * Diagnostics.
-       */
       backend: null,
       timestamp: 0,
     };
   }
 
-  /**
-   * Read skin index without creating Vector4.
-   */
   _readSkinIndices(attribute, index) {
     const itemSize = attribute.itemSize;
     const offset = index * itemSize;
@@ -623,9 +579,6 @@ export class ContactPerception {
     ];
   }
 
-  /**
-   * Read skin weights without creating Vector4.
-   */
   _readSkinWeights(attribute, index) {
     const itemSize = attribute.itemSize;
     const offset = index * itemSize;
@@ -639,12 +592,6 @@ export class ContactPerception {
     ];
   }
 
-  /**
-   * Calculate whether a vertex belongs to a foot region.
-   *
-   * Foot / toe influence is positive.
-   * Shin influence suppresses leg-only vertices.
-   */
   _footVertexScore(
     indices,
     weights,
@@ -689,18 +636,6 @@ export class ContactPerception {
     return footScore;
   }
 
-  /**
-   * Build representative probes from candidate vertices.
-   *
-   * Strategy:
-   *
-   * 1. Find the lowest coherent Y cluster.
-   * 2. Keep candidates from that cluster.
-   * 3. Select spatially separated points in XZ.
-   *
-   * This prevents us from probing the ankle/shin region simply
-   * because it contains many more vertices.
-   */
   _buildProbeSet(set, candidates) {
     if (!candidates.length) {
       set.count = 0;
@@ -736,9 +671,6 @@ export class ContactPerception {
       return;
     }
 
-    /*
-     * Limit retained candidate storage.
-     */
     const retainedCount = Math.min(
       64,
       cluster.length
@@ -750,10 +682,6 @@ export class ContactPerception {
       set.vertices[i] = cluster[i].index;
     }
 
-    /*
-     * First probe:
-     * lowest candidate.
-     */
     let first = cluster[0];
 
     for (let i = 1; i < cluster.length; i++) {
@@ -768,14 +696,10 @@ export class ContactPerception {
       first.z
     );
 
+    set.sampleVertices[0] = first.index;
+
     let selected = 1;
 
-    /*
-     * Farthest-point sampling in XZ.
-     *
-     * This produces spatially distributed probes rather than
-     * five nearly identical points.
-     */
     while (
       selected < this.targetProbes &&
       selected < cluster.length
@@ -819,15 +743,14 @@ export class ContactPerception {
         best.z
       );
 
+      set.sampleVertices[selected] = best.index;
+
       selected++;
     }
 
     set.count = selected;
   }
 
-  /**
-   * Measure all probes for one effector.
-   */
   _measureProbeSet(
     set,
     evidence,
@@ -858,6 +781,37 @@ export class ContactPerception {
       return;
     }
 
+    /*
+     * CRITICAL:
+     * Refresh the selected probe vertices from the CURRENT skinned
+     * pose before querying the surface.
+     *
+     * Candidate discovery remains initialization-only.
+     * Runtime work is bounded by the fixed probe count.
+     */
+    this.skinnedMesh.updateMatrixWorld(true);
+
+    for (let i = 0; i < set.count; i++) {
+      const vertexIndex = set.sampleVertices[i];
+
+      this.skinnedMesh.getVertexPosition(
+        vertexIndex,
+        this._vertexLocal
+      );
+
+      this._vertexWorld.copy(
+        this._vertexLocal
+      );
+
+      this._vertexWorld.applyMatrix4(
+        this.skinnedMesh.matrixWorld
+      );
+
+      set.samples[i].copy(
+        this._vertexWorld
+      );
+    }
+
     let validCount = 0;
     let nearCount = 0;
 
@@ -875,10 +829,6 @@ export class ContactPerception {
     let bestProbeIndex = -1;
     let bestAbsSeparation = Infinity;
 
-    /*
-     * First pass:
-     * query every probe and gather raw measurements.
-     */
     for (let i = 0; i < set.count; i++) {
       const probe = set.samples[i];
 
@@ -895,21 +845,8 @@ export class ContactPerception {
         continue;
       }
 
-      /*
-       * SurfaceQuery currently returns:
-       *
-       * separation = probe.y - surface.y
-       *
-       * Positive means probe is above surface.
-       */
       const separation = result.separation;
 
-      /*
-       * Reject probes that are below the surface by too much.
-       *
-       * A tiny negative value is tolerated because numerical /
-       * skinning precision can put a vertex slightly inside.
-       */
       if (
         separation <
         -this.contactSeparation
@@ -970,22 +907,10 @@ export class ContactPerception {
       return;
     }
 
-    /*
-     * We require at least two valid/near probes.
-     *
-     * One vertex touching the floor is not enough evidence that
-     * the whole foot is in contact.
-     */
     if (nearCount < 2) {
       return;
     }
 
-    /*
-     * Surface identity majority.
-     *
-     * For the current ground backend this is trivial, but the
-     * contract is deliberately future-proof for arbitrary surfaces.
-     */
     const majorityIndex =
       this._majoritySurfaceIndex(
         surfaceKeys,
@@ -1010,22 +935,9 @@ export class ContactPerception {
         ? majorityVotes / validCount
         : 0;
 
-    /*
-     * Near ratio:
-     *
-     * how many probes are actually close enough to contact.
-     */
     const nearRatio =
       nearCount / set.count;
 
-    /*
-     * Separation consistency:
-     *
-     * if the foot is genuinely on a surface, the contact
-     * probes should not disagree wildly in height.
-     *
-     * We normalize spread against contact tolerance.
-     */
     const spread =
       Math.max(
         0,
@@ -1043,13 +955,6 @@ export class ContactPerception {
             )
       );
 
-    /*
-     * Product rather than sum:
-     *
-     * confidence collapses when one important evidence component
-     * is bad. This prevents 5/5 "valid" votes from hiding a wildly
-     * inconsistent contact geometry.
-     */
     const confidence =
       nearRatio *
       separationConsistency *
@@ -1061,25 +966,10 @@ export class ContactPerception {
         Math.min(1, confidence)
       );
 
-    /*
-     * Probe agreement is intentionally a separate diagnostic.
-     *
-     * It answers:
-     * "Do the probes agree?"
-     *
-     * Confidence answers:
-     * "Do they agree strongly enough to call this usable evidence?"
-     */
     evidence.probeAgreement =
       nearRatio * 0.6 +
       separationConsistency * 0.4;
 
-    /*
-     * Choose representative contact point.
-     *
-     * We use the average of near probes when possible.
-     * This gives a much more stable support point than one vertex.
-     */
     let contactCount = 0;
 
     let contactX = 0;
@@ -1148,9 +1038,6 @@ export class ContactPerception {
         evidence.normal.normalize();
       }
     } else if (bestProbeIndex >= 0) {
-      /*
-       * Defensive fallback.
-       */
       const probe =
         set.samples[bestProbeIndex];
 
@@ -1172,18 +1059,9 @@ export class ContactPerception {
       }
     }
 
-    /*
-     * Representative separation:
-     * use the minimum measured separation.
-     *
-     * This is useful downstream as a conservative contact distance.
-     */
     evidence.separation =
       minSeparation;
 
-    /*
-     * Resolve majority surface identity.
-     */
     if (
       majorityIndex >= 0 &&
       surfaceKeys[majorityIndex]
@@ -1208,20 +1086,9 @@ export class ContactPerception {
       }
     }
 
-    /*
-     * Backend identity comes from the current query.
-     */
     evidence.backend =
       this._queryResult.backend;
 
-    /*
-     * Final validity gate.
-     *
-     * Perception does NOT establish/plant contact.
-     * It only says:
-     *
-     * "I have sufficiently strong geometric evidence."
-     */
     evidence.valid =
       evidence.confidence >=
         this.minConfidence &&
@@ -1229,10 +1096,6 @@ export class ContactPerception {
       majorityRatio >= 0.5 &&
       separationConsistency > 0;
 
-    /*
-     * Ensure confidence cannot claim validity if the point is
-     * somehow unavailable.
-     */
     if (
       !Number.isFinite(
         evidence.point.x
@@ -1248,9 +1111,6 @@ export class ContactPerception {
     }
   }
 
-  /**
-   * Stable surface identity key.
-   */
   _surfaceKey(surfaceId, surfaceType) {
     return (
       String(
@@ -1267,11 +1127,6 @@ export class ContactPerception {
     );
   }
 
-  /**
-   * Find the index of the majority surface.
-   *
-   * No object allocation.
-   */
   _majoritySurfaceIndex(
     keys,
     count,
@@ -1311,9 +1166,6 @@ export class ContactPerception {
     return bestIndex;
   }
 
-  /**
-   * Count votes for one surface key.
-   */
   _countSurfaceVotes(
     keys,
     count,
