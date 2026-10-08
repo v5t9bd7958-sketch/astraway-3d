@@ -13,24 +13,33 @@ import {
 /*
  * BodyStateBinder
  *
- * Единственная ответственность:
+ * WORLD / SKELETON OBSERVATION
+ *          ↓
+ *   ContactPerception
+ *          ↓
+ *   ContactEvidence
+ *          ↓
+ *   ContactState
+ *          ↓
+ *      BodyState
  *
- * Skeleton / World
- *       ↓
- * BodyStateBinder
- *       ↓
- * BodyState + ContactState
+ * Binder НЕ:
+ * - двигает кости;
+ * - вызывает IK;
+ * - выбирает gait;
+ * - выбирает traversal;
+ * - создаёт задачи;
+ * - создаёт constraints;
+ * - решает контакт по bone Y;
+ * - вызывает plant() на основании собственной геометрии.
  *
- * Binder НИКОГДА:
- * - не двигает кости;
- * - не вызывает IK;
- * - не выбирает gait;
- * - не создаёт задачи;
- * - не принимает traversal decisions;
- * - не меняет Pose;
- * - не является владельцем Skeleton.
- *
- * Он только измеряет уже существующее состояние.
+ * Binder только:
+ * - измеряет root;
+ * - измеряет velocity;
+ * - измеряет COM;
+ * - принимает ContactEvidence;
+ * - передаёт evidence в ContactState;
+ * - обновляет BodyState.
  */
 
 export class BodyStateBinder {
@@ -40,8 +49,11 @@ export class BodyStateBinder {
     skinnedMesh = null,
     bodyState,
     groundY = 0,
+
     contactDistance = 0.045,
     contactVelocityThreshold = 0.35,
+
+    contactPerception = null,
   } = {}) {
     if (!root) {
       throw new Error(
@@ -61,6 +73,12 @@ export class BodyStateBinder {
       );
     }
 
+    if (!contactPerception) {
+      throw new Error(
+        "BodyStateBinder: contactPerception required"
+      );
+    }
+
     this.root = root;
     this.skeleton = skeleton;
     this.skinnedMesh = skinnedMesh;
@@ -68,65 +86,45 @@ export class BodyStateBinder {
 
     this.groundY = groundY;
 
+    /*
+     * Эти параметры пока сохраняем как часть публичного API.
+     *
+     * ВАЖНО:
+     * они больше НЕ принимают решение о контакте.
+     *
+     * Контакт определяется через ContactPerception.
+     */
     this.contactDistance =
       contactDistance;
 
     this.contactVelocityThreshold =
       contactVelocityThreshold;
 
+    this.contactPerception =
+      contactPerception;
+
     /*
-     * DIAGNOSTICS ONLY.
+     * Diagnostics only.
      *
-     * Это наблюдаемая телеметрия контакта.
-     * Она НЕ участвует в принятии решения.
+     * Никакого влияния на lifecycle.
      */
     this.diagnostics = {
-      left: {
-        footY: NaN,
-        groundY: this.groundY,
-        dy: Infinity,
-
-        footSurfaceY: NaN,
-        footSurfaceDy: Infinity,
-        footSurfaceVertices: 0,
-
-        verticalVelocity: 0,
-        nearGround: false,
-        stableEnough: false,
-        phase: "none",
-      },
-
-      right: {
-        footY: NaN,
-        groundY: this.groundY,
-        dy: Infinity,
-
-        footSurfaceY: NaN,
-        footSurfaceDy: Infinity,
-        footSurfaceVertices: 0,
-
-        verticalVelocity: 0,
-        nearGround: false,
-        stableEnough: false,
-        phase: "none",
-      },
+      left: this._createFootDiagnostics(),
+      right: this._createFootDiagnostics(),
     };
 
+    /*
+     * Persistent scratch.
+     *
+     * Никаких новых Vector3 в update().
+     */
     this._previousPosition =
       new THREE.Vector3();
 
     this._previousCOM =
       new THREE.Vector3();
 
-    this._initialized = false;
-
     this._worldPosition =
-      new THREE.Vector3();
-
-    this._worldQuaternion =
-      new THREE.Quaternion();
-
-    this._localPosition =
       new THREE.Vector3();
 
     this._velocity =
@@ -135,24 +133,44 @@ export class BodyStateBinder {
     this._com =
       new THREE.Vector3();
 
-    this._tmpA =
+    this._bonePosition =
       new THREE.Vector3();
 
-    this._tmpB =
-      new THREE.Vector3();
-
-    this._tmpC =
-      new THREE.Vector3();
-
-    this._skinnedVertex =
-      new THREE.Vector3();
-
-    this._worldVertex =
-      new THREE.Vector3();
+    this._initialized = false;
 
     this._contactsInitialized = false;
 
     this._initializeContacts();
+  }
+
+  _createFootDiagnostics() {
+    return {
+      footY: NaN,
+      groundY: this.groundY,
+      dy: Infinity,
+
+      footSurfaceY: NaN,
+      footSurfaceDy: Infinity,
+      footSurfaceVertices: 0,
+
+      verticalVelocity: 0,
+
+      nearGround: false,
+      stableEnough: false,
+
+      evidenceValid: false,
+      confidence: 0,
+      separation: Infinity,
+
+      probeCount: 0,
+      nearProbeCount: 0,
+      probeAgreement: 0,
+
+      surfaceId: null,
+      surfaceType: null,
+
+      phase: "none",
+    };
   }
 
   _initializeContacts() {
@@ -223,22 +241,6 @@ export class BodyStateBinder {
     );
   }
 
-  _readBonePosition(
-    logicalName,
-    target
-  ) {
-    const bone =
-      this._findBone(logicalName);
-
-    if (!bone) {
-      return null;
-    }
-
-    bone.getWorldPosition(target);
-
-    return bone;
-  }
-
   _measureRoot() {
     this.root.getWorldPosition(
       this._worldPosition
@@ -252,8 +254,15 @@ export class BodyStateBinder {
   }
 
   _measureVelocity(dt) {
-    if (!this._initialized || dt <= 0) {
-      this._velocity.set(0, 0, 0);
+    if (
+      !this._initialized ||
+      dt <= 0
+    ) {
+      this._velocity.set(
+        0,
+        0,
+        0
+      );
 
       this.bodyState.setVelocity(
         this._velocity
@@ -265,7 +274,9 @@ export class BodyStateBinder {
     this._velocity
       .copy(this.bodyState.position)
       .sub(this._previousPosition)
-      .multiplyScalar(1 / dt);
+      .multiplyScalar(
+        1 / dt
+      );
 
     this.bodyState.setVelocity(
       this._velocity
@@ -275,148 +286,120 @@ export class BodyStateBinder {
   /*
    * Kinematic COM proxy.
    *
-   * Это НЕ физический центр масс.
+   * Это пока НЕ физический центр масс.
    *
-   * Пока мы используем взвешенную
-   * анатомическую модель.
+   * Важное изменение:
+   * здесь больше нет массива samples
+   * и новых Vector3 на каждый кадр.
    */
   _measureCOM() {
-    const samples = [];
+    this._com.set(
+      0,
+      0,
+      0
+    );
 
-    this._addWeightedBone(
-      samples,
+    let totalWeight = 0;
+
+    totalWeight += this._accumulateBone(
       "pelvis",
       4.0
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "spine01",
       2.5
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "spine02",
       3.0
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "chest",
       3.0
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "neck",
       0.7
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "head",
       1.0
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "upperArm_L",
       1.0
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "foreArm_L",
       0.7
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "hand_L",
       0.35
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "upperArm_R",
       1.0
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "foreArm_R",
       0.7
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "hand_R",
       0.35
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "thigh_L",
       2.0
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "shin_L",
       1.2
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "foot_L",
       0.5
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "thigh_R",
       2.0
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "shin_R",
       1.2
     );
 
-    this._addWeightedBone(
-      samples,
+    totalWeight += this._accumulateBone(
       "foot_R",
       0.5
     );
 
-    if (!samples.length) {
-      this._com.set(0, 0, 0);
-
-      this.bodyState.setCOM(
-        this._com
-      );
-
-      return;
-    }
-
-    this._com.set(0, 0, 0);
-
-    let totalWeight = 0;
-
-    for (const sample of samples) {
-      this._com.addScaledVector(
-        sample.position,
-        sample.weight
-      );
-
-      totalWeight += sample.weight;
-    }
-
     if (totalWeight > 0) {
       this._com.multiplyScalar(
         1 / totalWeight
+      );
+    } else {
+      this._com.set(
+        0,
+        0,
+        0
       );
     }
 
@@ -425,29 +408,29 @@ export class BodyStateBinder {
     );
   }
 
-  _addWeightedBone(
-    samples,
+  _accumulateBone(
     logicalName,
     weight
   ) {
     const bone =
-      this._findBone(logicalName);
+      this._findBone(
+        logicalName
+      );
 
     if (!bone) {
-      return;
+      return 0;
     }
 
-    const position =
-      new THREE.Vector3();
-
     bone.getWorldPosition(
-      position
+      this._bonePosition
     );
 
-    samples.push({
-      position,
-      weight,
-    });
+    this._com.addScaledVector(
+      this._bonePosition,
+      weight
+    );
+
+    return weight;
   }
 
   _measureCOMVelocity(dt) {
@@ -467,260 +450,34 @@ export class BodyStateBinder {
     this.bodyState.comVelocity
       .copy(this.bodyState.com)
       .sub(this._previousCOM)
-      .multiplyScalar(1 / dt);
+      .multiplyScalar(
+        1 / dt
+      );
   }
 
   /*
    * -------------------------------------------------------
-   * FOOT GEOMETRY DIAGNOSTICS
+   * CONTACT PERCEPTION → CONTACT STATE
    * -------------------------------------------------------
    *
-   * Это НЕ contact solver.
+   * Это теперь единственный путь,
+   * которым perception влияет на ContactState.
    *
-   * Мы просто измеряем нижнюю точку
-   * текущей деформированной SkinnedMesh,
-   * используя вершины, на которые существенно
-   * влияют foot + toe bones.
+   * ContactPerception:
+   *   измеряет.
    *
-   * ВАЖНО:
-   * результат НЕ влияет на nearGround,
-   * plant/release или ContactState.
+   * ContactState:
+   *   применяет temporal lifecycle.
+   *
+   * BodyState:
+   *   строит support polygon / balance.
    */
 
-  _measureFootSurface(
-    logicalFoot,
-    logicalToe
-  ) {
-    const mesh =
-      this.skinnedMesh;
-
-    if (
-      !mesh?.isSkinnedMesh ||
-      !mesh.geometry
-    ) {
-      return {
-        minY: NaN,
-        vertexCount: 0,
-      };
-    }
-
-    const geometry =
-      mesh.geometry;
-
-    const positionAttribute =
-      geometry.getAttribute(
-        "position"
-      );
-
-    const skinIndexAttribute =
-      geometry.getAttribute(
-        "skinIndex"
-      );
-
-    const skinWeightAttribute =
-      geometry.getAttribute(
-        "skinWeight"
-      );
-
-    if (
-      !positionAttribute ||
-      !skinIndexAttribute ||
-      !skinWeightAttribute
-    ) {
-      return {
-        minY: NaN,
-        vertexCount: 0,
-      };
-    }
-
-    const footBone =
-      this._findBone(
-        logicalFoot
-      );
-
-    const toeBone =
-      this._findBone(
-        logicalToe
-      );
-
-    if (
-      !footBone ||
-      !toeBone
-    ) {
-      return {
-        minY: NaN,
-        vertexCount: 0,
-      };
-    }
-
-    const footIndex =
-      this.skeleton.bones.indexOf(
-        footBone
-      );
-
-    const toeIndex =
-      this.skeleton.bones.indexOf(
-        toeBone
-      );
-
-    if (
-      footIndex < 0 ||
-      toeIndex < 0
-    ) {
-      return {
-        minY: NaN,
-        vertexCount: 0,
-      };
-    }
-
-    /*
-     * Only vertices with meaningful
-     * foot/toe influence participate.
-     *
-     * We deliberately use a moderate
-     * threshold so the diagnostic sees
-     * the actual shoe/foot volume without
-     * pulling the shin into the sample.
-     */
-    const influenceThreshold =
-      0.25;
-
-    let minY =
-      Infinity;
-
-    let vertexCount =
-      0;
-
-    const vertex =
-      this._skinnedVertex;
-
-    const worldVertex =
-      this._worldVertex;
-
-    const count =
-      positionAttribute.count;
-
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-      let footWeight = 0;
-      let toeWeight = 0;
-
-      for (
-        let j = 0;
-        j < 4;
-        j++
-      ) {
-        const index =
-          skinIndexAttribute.getComponent(
-            i,
-            j
-          );
-
-        const weight =
-          skinWeightAttribute.getComponent(
-            i,
-            j
-          );
-
-        if (
-          index === footIndex
-        ) {
-          footWeight += weight;
-        }
-
-        if (
-          index === toeIndex
-        ) {
-          toeWeight += weight;
-        }
-      }
-
-      const footInfluence =
-        footWeight +
-        toeWeight;
-
-      if (
-        footInfluence <
-        influenceThreshold
-      ) {
-        continue;
-      }
-
-      /*
-       * Three.js returns the current
-       * skinned/morphed vertex position.
-       */
-      mesh.getVertexPosition(
-        i,
-        vertex
-      );
-
-      worldVertex
-        .copy(vertex);
-
-      mesh.localToWorld(
-        worldVertex
-      );
-
-      if (
-        worldVertex.y <
-        minY
-      ) {
-        minY =
-          worldVertex.y;
-      }
-
-      vertexCount++;
-    }
-
-    return {
-      minY:
-        Number.isFinite(minY)
-          ? minY
-          : NaN,
-
-      vertexCount,
-    };
-  }
-
-  _updateFootSurfaceDiagnostic(
-    logicalFoot,
-    logicalToe,
-    diagnostics
-  ) {
-    if (!diagnostics) {
-      return;
-    }
-
-    const surface =
-      this._measureFootSurface(
-        logicalFoot,
-        logicalToe
-      );
-
-    diagnostics.footSurfaceY =
-      surface.minY;
-
-    diagnostics.footSurfaceVertices =
-      surface.vertexCount;
-
-    diagnostics.footSurfaceDy =
-      Number.isFinite(
-        surface.minY
-      )
-        ? Math.abs(
-            surface.minY -
-            this.groundY
-          )
-        : Infinity;
-  }
-
-  _measureContact(
+  _applyFootEvidence(
     logicalBone,
-    contactId
+    contactId,
+    evidence,
+    diagnostics
   ) {
     const contact =
       this.bodyState.contacts.get(
@@ -731,17 +488,92 @@ export class BodyStateBinder {
       return;
     }
 
-    const side =
-      contactId === "contact_foot_L"
-        ? "left"
-        : contactId === "contact_foot_R"
-          ? "right"
-          : null;
+    /*
+     * Evidence → lifecycle.
+     *
+     * Binder НЕ решает:
+     * candidate / established / planted.
+     *
+     * Это ответственность ContactState.
+     */
+    contact.applyEvidence(
+      evidence,
+      this._lastDt
+    );
 
-    const diagnostics =
-      side
-        ? this.diagnostics[side]
-        : null;
+    /*
+     * Support classification.
+     *
+     * Это пока статическая роль контакта:
+     * foot contacts являются support-capable.
+     *
+     * PLANTED уже определяется ContactState.
+     */
+    contact.isSupport =
+      contact.type === "support";
+
+    /*
+     * Diagnostics.
+     */
+    if (diagnostics) {
+      diagnostics.evidenceValid =
+        !!evidence?.valid;
+
+      diagnostics.confidence =
+        Number.isFinite(
+          evidence?.confidence
+        )
+          ? evidence.confidence
+          : 0;
+
+      diagnostics.separation =
+        Number.isFinite(
+          evidence?.separation
+        )
+          ? evidence.separation
+          : Infinity;
+
+      diagnostics.probeCount =
+        evidence?.probeCount || 0;
+
+      diagnostics.nearProbeCount =
+        evidence?.nearProbeCount || 0;
+
+      diagnostics.probeAgreement =
+        Number.isFinite(
+          evidence?.probeAgreement
+        )
+          ? evidence.probeAgreement
+          : 0;
+
+      diagnostics.surfaceId =
+        evidence?.surfaceId ?? null;
+
+      diagnostics.surfaceType =
+        evidence?.surfaceType ?? null;
+
+      diagnostics.phase =
+        contact.phase;
+    }
+
+    /*
+     * IMPORTANT:
+     *
+     * No contact.plant() here.
+     * No contact.break() here.
+     * No contact.release() here.
+     *
+     * ContactState owns lifecycle.
+     */
+  }
+
+  _updateContactDiagnostics(
+    logicalBone,
+    diagnostics
+  ) {
+    if (!diagnostics) {
+      return;
+    }
 
     const bone =
       this._findBone(
@@ -749,180 +581,152 @@ export class BodyStateBinder {
       );
 
     if (!bone) {
-      contact.release();
+      diagnostics.footY = NaN;
+      diagnostics.dy = Infinity;
 
-      if (diagnostics) {
-        diagnostics.footY = NaN;
-        diagnostics.groundY =
-          this.groundY;
-        diagnostics.dy = Infinity;
+      diagnostics.nearGround =
+        false;
 
-        diagnostics.footSurfaceY =
-          NaN;
-
-        diagnostics.footSurfaceDy =
-          Infinity;
-
-        diagnostics.footSurfaceVertices =
-          0;
-
-        diagnostics.verticalVelocity =
-          0;
-
-        diagnostics.nearGround =
-          false;
-
-        diagnostics.stableEnough =
-          false;
-
-        diagnostics.phase =
-          contact.phase;
-      }
+      diagnostics.stableEnough =
+        false;
 
       return;
     }
 
-    const position =
-      this._tmpA;
-
     bone.getWorldPosition(
-      position
+      this._bonePosition
     );
 
-    const distance =
+    diagnostics.footY =
+      this._bonePosition.y;
+
+    diagnostics.groundY =
+      this.groundY;
+
+    diagnostics.dy =
       Math.abs(
-        position.y -
+        this._bonePosition.y -
         this.groundY
       );
 
-    const nearGround =
-      distance <=
-      this.contactDistance;
-
-    const verticalVelocity =
+    diagnostics.verticalVelocity =
       Math.abs(
         this.bodyState.velocity.y
       );
 
-    const stableEnough =
-      verticalVelocity <=
+    /*
+     * These two fields remain diagnostic only.
+     *
+     * They are deliberately NOT used to establish
+     * or release contact.
+     */
+    diagnostics.nearGround =
+      diagnostics.dy <=
+      this.contactDistance;
+
+    diagnostics.stableEnough =
+      diagnostics.verticalVelocity <=
       this.contactVelocityThreshold;
-
-    /*
-     * GEOMETRY DIAGNOSTICS.
-     *
-     * Read current skinned foot geometry.
-     * This does NOT alter lifecycle.
-     */
-    this._updateFootSurfaceDiagnostic(
-      logicalBone,
-      logicalBone === "foot_L"
-        ? "toe_L"
-        : "toe_R",
-      diagnostics
-    );
-
-    /*
-     * DIAGNOSTICS:
-     * читаем факты ДО lifecycle decision.
-     *
-     * Никакого влияния на механику.
-     */
-    if (diagnostics) {
-      diagnostics.footY =
-        position.y;
-
-      diagnostics.groundY =
-        this.groundY;
-
-      diagnostics.dy =
-        distance;
-
-      diagnostics.verticalVelocity =
-        verticalVelocity;
-
-      diagnostics.nearGround =
-        nearGround;
-
-      diagnostics.stableEnough =
-        stableEnough;
-    }
-
-    /*
-     * ВАЖНО:
-     *
-     * Здесь остаётся СТАРАЯ contact
-     * механика.
-     *
-     * footSurfaceY пока НЕ участвует.
-     */
-    if (
-      nearGround &&
-      stableEnough
-    ) {
-      const point =
-        this._tmpB.copy(
-          position
-        );
-
-      point.y =
-        this.groundY;
-
-      contact.plant({
-        point,
-        normal:
-          this._tmpC.set(
-            0,
-            1,
-            0
-          ),
-      });
-
-      contact.isSupport = true;
-
-      if (diagnostics) {
-        diagnostics.phase =
-          contact.phase;
-      }
-
-      return;
-    }
-
-    if (
-      contact.isPlanted()
-    ) {
-      contact.break();
-
-      if (diagnostics) {
-        diagnostics.phase =
-          contact.phase;
-      }
-
-      return;
-    }
-
-    contact.release();
-
-    if (diagnostics) {
-      diagnostics.phase =
-        contact.phase;
-    }
   }
 
-  _measureContacts() {
-    this._measureContact(
+  _updateContactDiagnosticsFromEvidence(
+    evidence,
+    diagnostics
+  ) {
+    if (
+      !evidence ||
+      !diagnostics
+    ) {
+      return;
+    }
+
+    /*
+     * Evidence point is the measured surface point.
+     *
+     * This is the correct geometry-space observation.
+     */
+    diagnostics.footSurfaceY =
+      Number.isFinite(
+        evidence.point?.y
+      )
+        ? evidence.point.y
+        : NaN;
+
+    diagnostics.footSurfaceDy =
+      Number.isFinite(
+        evidence.separation
+      )
+        ? Math.abs(
+            evidence.separation
+          )
+        : Infinity;
+
+    /*
+     * ContactPerception currently does not expose
+     * its internal vertex count.
+     *
+     * Keep this field for compatibility.
+     */
+    diagnostics.footSurfaceVertices =
+      evidence.probeCount || 0;
+  }
+
+  _measureContacts(dt) {
+    this._lastDt = dt;
+
+    /*
+     * Perception is measured ONCE per frame.
+     */
+    const evidence =
+      this.contactPerception.update(
+        this.bodyState.time
+      );
+
+    /*
+     * Foot L.
+     */
+    this._applyFootEvidence(
       "foot_L",
-      "contact_foot_L"
+      "contact_foot_L",
+      evidence?.left || null,
+      this.diagnostics.left
     );
 
-    this._measureContact(
-      "foot_R",
-      "contact_foot_R"
+    this._updateContactDiagnostics(
+      "foot_L",
+      this.diagnostics.left
+    );
+
+    this._updateContactDiagnosticsFromEvidence(
+      evidence?.left || null,
+      this.diagnostics.left
     );
 
     /*
-     * Hands are intentionally NOT treated
-     * as floor support.
+     * Foot R.
+     */
+    this._applyFootEvidence(
+      "foot_R",
+      "contact_foot_R",
+      evidence?.right || null,
+      this.diagnostics.right
+    );
+
+    this._updateContactDiagnostics(
+      "foot_R",
+      this.diagnostics.right
+    );
+
+    this._updateContactDiagnosticsFromEvidence(
+      evidence?.right || null,
+      this.diagnostics.right
+    );
+
+    /*
+     * Hands intentionally remain untouched.
+     *
+     * They will later receive their own perception
+     * provider when arbitrary surface interaction exists.
      */
   }
 
@@ -937,10 +741,17 @@ export class BodyStateBinder {
     }
 
     /*
-     * Critical rule:
+     * Critical observation order:
      *
-     * We read AFTER the skeleton has
-     * reached its current pose.
+     * current pose
+     *      ↓
+     * world matrices
+     *      ↓
+     * perception
+     *      ↓
+     * contact lifecycle
+     *      ↓
+     * BodyState derived state
      *
      * Binder never writes bone transforms.
      */
@@ -950,19 +761,55 @@ export class BodyStateBinder {
 
     this._measureRoot();
 
-    this._measureVelocity(dt);
+    this._measureVelocity(
+      dt
+    );
 
     this._measureCOM();
 
-    this._measureCOMVelocity(dt);
+    this._measureCOMVelocity(
+      dt
+    );
 
-    this._measureContacts();
+    this._measureContacts(
+      dt
+    );
 
     /*
-     * BodyState performs the derived
-     * support polygon / balance calculation.
+     * BodyState.update() advances ContactState
+     * temporal phase timers and rebuilds:
+     *
+     * support points
+     * support polygon
+     * balance
      */
-    this.bodyState.update(dt);
+    this.bodyState.update(
+      dt
+    );
+
+    /*
+     * Diagnostics must expose the final phase,
+     * after BodyState has advanced lifecycle.
+     */
+    const left =
+      this.bodyState.contacts.get(
+        "contact_foot_L"
+      );
+
+    const right =
+      this.bodyState.contacts.get(
+        "contact_foot_R"
+      );
+
+    if (left) {
+      this.diagnostics.left.phase =
+        left.phase;
+    }
+
+    if (right) {
+      this.diagnostics.right.phase =
+        right.phase;
+    }
 
     this._previousPosition.copy(
       this.bodyState.position
@@ -982,9 +829,11 @@ export class BodyStateBinder {
   }
 
   getContact(id) {
-    return this.bodyState.contacts.get(
-      id
-    ) || null;
+    return (
+      this.bodyState.contacts.get(
+        id
+      ) || null
+    );
   }
 
   getContacts() {
@@ -995,3 +844,5 @@ export class BodyStateBinder {
     return this.diagnostics;
   }
 }
+
+export default BodyStateBinder;
