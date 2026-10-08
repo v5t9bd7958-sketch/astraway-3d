@@ -9,22 +9,24 @@
  *
  * IMPORTANT:
  *   Этот файл НЕ управляет Character.
- *   НЕ пишет кости.
  *   НЕ содержит Gait.
  *   НЕ содержит ContactManager.
  *   НЕ содержит BodyState.
  *
- *   Он только:
+ *   Он:
  *     1. фиксирует BasePose;
  *     2. описывает сценарии A–G;
  *     3. запускает Solver через единый контракт;
  *     4. измеряет результат;
- *     5. сравнивает Solver-ы на одинаковых входах.
+ *     5. разделяет affected / unaffected drift;
+ *     6. сравнивает Solver-ы на одинаковых входах.
  *
- *   Первый этап этого файла намеренно может работать
- *   без конкретного SolverAdapter.
+ * ARCHITECTURAL RULE:
+ *   Bakeoff не использует Skeleton.pose() и Skeleton.update()
+ *   для восстановления или обновления позы.
  *
- *   Это архитектурный тестовый стенд, а не Character Controller.
+ *   Обе операции могут вернуть skeleton в base pose.
+ *   Для matrix propagation используется Object3D.updateMatrixWorld().
  */
 
 import * as THREE from "three";
@@ -36,7 +38,7 @@ import * as THREE from "three";
  */
 
 export const BAKEOFF_VERSION =
-  "AstraWay Solver Decision Gate v0.1";
+  "AstraWay Solver Decision Gate v0.2";
 
 export const BAKEOFF_SCENARIOS = Object.freeze([
   "A",
@@ -58,38 +60,184 @@ export const BAKEOFF_THRESHOLDS = Object.freeze({
 
 /*
  * ---------------------------------------------------------
+ * LOGICAL → CANONICAL
+ * ---------------------------------------------------------
+ */
+
+const LOGICAL_TO_CANONICAL = Object.freeze({
+  pelvis: "Hips",
+
+  spine01: "Spine",
+  spine02: "Spine1",
+  chest: "Spine2",
+
+  neck: "Neck",
+  head: "Head",
+
+  clavicle_L: "LeftShoulder",
+  upperArm_L: "LeftArm",
+  foreArm_L: "LeftForeArm",
+  hand_L: "LeftHand",
+
+  clavicle_R: "RightShoulder",
+  upperArm_R: "RightArm",
+  foreArm_R: "RightForeArm",
+  hand_R: "RightHand",
+
+  thigh_L: "LeftUpLeg",
+  shin_L: "LeftLeg",
+  foot_L: "LeftFoot",
+  toe_L: "LeftToeBase",
+
+  thigh_R: "RightUpLeg",
+  shin_R: "RightLeg",
+  foot_R: "RightFoot",
+  toe_R: "RightToeBase",
+});
+
+function mapLogicalToCanonical(name) {
+  return LOGICAL_TO_CANONICAL[name] || name;
+}
+
+/*
+ * ---------------------------------------------------------
  * SMALL UTILITY
  * ---------------------------------------------------------
  */
 
 function finiteNumber(value, fallback = 0) {
-  return Number.isFinite(value)
-    ? value
-    : fallback;
+  return Number.isFinite(value) ? value : fallback;
 }
 
 function cloneVector3(value) {
-  return value
-    ? value.clone()
-    : new THREE.Vector3();
+  return value ? value.clone() : new THREE.Vector3();
 }
 
 function cloneQuaternion(value) {
-  return value
-    ? value.clone()
-    : new THREE.Quaternion();
+  return value ? value.clone() : new THREE.Quaternion();
+}
+
+function findBone(skeleton, name) {
+  const canonical = mapLogicalToCanonical(name);
+
+  return skeleton.bones.find(
+    (bone) =>
+      bone.name === canonical ||
+      bone.name === name
+  );
+}
+
+/*
+ * ---------------------------------------------------------
+ * MATRIX REFRESH
+ *
+ * IMPORTANT:
+ *
+ * DO NOT call skeleton.update().
+ * DO NOT call skeleton.pose().
+ *
+ * Both are inappropriate here because Skeleton.pose()
+ * resets the skeleton to base pose and Skeleton.update()
+ * is also documented as resetting the skeleton to base pose.
+ *
+ * We only propagate Object3D transforms.
+ * ---------------------------------------------------------
+ */
+
+export function refreshSkeletonWorldMatrices(skeleton) {
+  if (!skeleton?.bones) {
+    throw new Error(
+      "refreshSkeletonWorldMatrices: THREE.Skeleton missing"
+    );
+  }
+
+  /*
+   * Find root bones.
+   *
+   * XBot normally has one main skeleton root,
+   * but this also works with multiple roots.
+   */
+  const roots = skeleton.bones.filter(
+    (bone) => !bone.parent || !bone.parent.isBone
+  );
+
+  if (roots.length > 0) {
+    for (const root of roots) {
+      root.updateMatrixWorld(true);
+    }
+  } else {
+    /*
+     * Defensive fallback.
+     */
+    for (const bone of skeleton.bones) {
+      bone.updateMatrixWorld(true);
+    }
+  }
+
+  /*
+   * Ensure every bone has a current world matrix.
+   */
+  for (const bone of skeleton.bones) {
+    bone.updateMatrixWorld(true);
+  }
+}
+
+/*
+ * ---------------------------------------------------------
+ * WORLD POSITION / ROTATION
+ * ---------------------------------------------------------
+ */
+
+function getWorldPosition(skeleton, logicalName) {
+  refreshSkeletonWorldMatrices(skeleton);
+
+  const bone = findBone(
+    skeleton,
+    logicalName
+  );
+
+  if (!bone) {
+    throw new Error(
+      `Bakeoff: bone not found: ${logicalName}`
+    );
+  }
+
+  return bone.getWorldPosition(
+    new THREE.Vector3()
+  );
+}
+
+function getWorldQuaternion(skeleton, logicalName) {
+  refreshSkeletonWorldMatrices(skeleton);
+
+  const bone = findBone(
+    skeleton,
+    logicalName
+  );
+
+  if (!bone) {
+    throw new Error(
+      `Bakeoff: bone not found: ${logicalName}`
+    );
+  }
+
+  return bone.getWorldQuaternion(
+    new THREE.Quaternion()
+  );
 }
 
 /*
  * ---------------------------------------------------------
  * POSE SNAPSHOT
+ * ---------------------------------------------------------
  *
- * This is intentionally independent of any Solver.
+ * BasePose is owned by Bakeoff.
  *
- * BasePose belongs to the Bakeoff.
- * Solver receives a copy.
- * Solver is never allowed to mutate the
- * authoritative BasePose object.
+ * Solver receives a clone.
+ *
+ * Restore writes local transforms directly.
+ *
+ * NO skeleton.pose().
  * ---------------------------------------------------------
  */
 
@@ -106,18 +254,17 @@ export class PoseSnapshot {
       );
     }
 
-    const snapshot =
-      new PoseSnapshot();
+    const snapshot = new PoseSnapshot();
 
     for (const bone of skeleton.bones) {
       snapshot.rotations.set(
         bone.name,
-        cloneQuaternion(bone.quaternion)
+        bone.quaternion.clone()
       );
 
       snapshot.positions.set(
         bone.name,
-        cloneVector3(bone.position)
+        bone.position.clone()
       );
     }
 
@@ -125,8 +272,7 @@ export class PoseSnapshot {
   }
 
   clone() {
-    const copy =
-      new PoseSnapshot();
+    const copy = new PoseSnapshot();
 
     for (const [name, rotation] of this.rotations) {
       copy.rotations.set(
@@ -152,6 +298,11 @@ export class PoseSnapshot {
       );
     }
 
+    /*
+     * Restore LOCAL transforms.
+     *
+     * This is the authoritative restore path.
+     */
     for (const bone of skeleton.bones) {
       const rotation =
         this.rotations.get(bone.name);
@@ -160,31 +311,46 @@ export class PoseSnapshot {
         this.positions.get(bone.name);
 
       if (rotation) {
-        bone.quaternion.copy(
-          rotation
-        );
+        bone.quaternion.copy(rotation);
       }
 
       if (position) {
-        bone.position.copy(
-          position
-        );
+        bone.position.copy(position);
       }
     }
 
-    skeleton.pose();
-
-    for (const bone of skeleton.bones) {
-      bone.updateMatrixWorld(true);
-    }
+    /*
+     * Propagate matrices.
+     *
+     * NEVER call skeleton.pose() here.
+     */
+    refreshSkeletonWorldMatrices(
+      skeleton
+    );
   }
 
-  maxRotationDrift(skeleton) {
+  maxRotationDrift(
+    skeleton,
+    affectedBones = null
+  ) {
     let maxDrift = 0;
 
     for (const bone of skeleton.bones) {
+      /*
+       * If affectedBones is supplied,
+       * only measure UNAFFECTED bones.
+       */
+      if (
+        affectedBones &&
+        affectedBones.has(bone.name)
+      ) {
+        continue;
+      }
+
       const original =
-        this.rotations.get(bone.name);
+        this.rotations.get(
+          bone.name
+        );
 
       if (!original) {
         continue;
@@ -195,22 +361,33 @@ export class PoseSnapshot {
           bone.quaternion
         );
 
-      maxDrift =
-        Math.max(
-          maxDrift,
-          Math.abs(angle)
-        );
+      maxDrift = Math.max(
+        maxDrift,
+        Math.abs(angle)
+      );
     }
 
     return maxDrift;
   }
 
-  maxPositionDrift(skeleton) {
+  maxPositionDrift(
+    skeleton,
+    affectedBones = null
+  ) {
     let maxDrift = 0;
 
     for (const bone of skeleton.bones) {
+      if (
+        affectedBones &&
+        affectedBones.has(bone.name)
+      ) {
+        continue;
+      }
+
       const original =
-        this.positions.get(bone.name);
+        this.positions.get(
+          bone.name
+        );
 
       if (!original) {
         continue;
@@ -221,11 +398,64 @@ export class PoseSnapshot {
           bone.position
         );
 
-      maxDrift =
-        Math.max(
-          maxDrift,
-          distance
+      maxDrift = Math.max(
+        maxDrift,
+        distance
+      );
+    }
+
+    return maxDrift;
+  }
+
+  maxRotationDriftAll(
+    skeleton
+  ) {
+    let maxDrift = 0;
+
+    for (const bone of skeleton.bones) {
+      const original =
+        this.rotations.get(
+          bone.name
         );
+
+      if (!original) {
+        continue;
+      }
+
+      maxDrift = Math.max(
+        maxDrift,
+        Math.abs(
+          original.angleTo(
+            bone.quaternion
+          )
+        )
+      );
+    }
+
+    return maxDrift;
+  }
+
+  maxPositionDriftAll(
+    skeleton
+  ) {
+    let maxDrift = 0;
+
+    for (const bone of skeleton.bones) {
+      const original =
+        this.positions.get(
+          bone.name
+        );
+
+      if (!original) {
+        continue;
+      }
+
+      maxDrift = Math.max(
+        maxDrift,
+        original.distanceTo(
+          bone.position
+        )
+      );
     }
 
     return maxDrift;
@@ -251,46 +481,43 @@ export class BakeoffEffector {
     this.id = id;
     this.bone = bone;
 
-    this.targetPos =
-      targetPos
-        ? targetPos.clone()
-        : null;
+    this.targetPos = targetPos
+      ? targetPos.clone()
+      : null;
 
-    this.targetRot =
-      targetRot
-        ? targetRot.clone()
-        : null;
+    this.targetRot = targetRot
+      ? targetRot.clone()
+      : null;
 
-    this.weightPos =
-      finiteNumber(
-        weightPos,
-        1
-      );
+    this.weightPos = finiteNumber(
+      weightPos,
+      1
+    );
 
-    this.weightRot =
-      finiteNumber(
-        weightRot,
-        0
-      );
+    this.weightRot = finiteNumber(
+      weightRot,
+      0
+    );
 
-    this.enabled =
-      Boolean(enabled);
+    this.enabled = Boolean(enabled);
   }
 
   clone() {
     return new BakeoffEffector({
       id: this.id,
       bone: this.bone,
-      targetPos:
-        this.targetPos
-          ? this.targetPos.clone()
-          : null,
-      targetRot:
-        this.targetRot
-          ? this.targetRot.clone()
-          : null,
+
+      targetPos: this.targetPos
+        ? this.targetPos.clone()
+        : null,
+
+      targetRot: this.targetRot
+        ? this.targetRot.clone()
+        : null,
+
       weightPos: this.weightPos,
       weightRot: this.weightRot,
+
       enabled: this.enabled,
     });
   }
@@ -310,27 +537,35 @@ export class BakeoffScenario {
     effectors = [],
     frames = 1,
     unreachable = false,
+    affectedBones = [],
   }) {
     this.id = id;
     this.name = name;
     this.description = description;
 
-    this.effectors =
-      effectors.map(
-        (effector) =>
-          effector instanceof BakeoffEffector
-            ? effector
-            : new BakeoffEffector(effector)
-      );
+    this.effectors = effectors.map(
+      (effector) =>
+        effector instanceof BakeoffEffector
+          ? effector
+          : new BakeoffEffector(
+              effector
+            )
+    );
 
-    this.frames =
-      Math.max(
-        1,
-        Math.floor(frames)
-      );
+    this.frames = Math.max(
+      1,
+      Math.floor(frames)
+    );
 
     this.unreachable =
       Boolean(unreachable);
+
+    this.affectedBones =
+      new Set(
+        affectedBones.map(
+          mapLogicalToCanonical
+        )
+      );
   }
 
   clone() {
@@ -338,27 +573,87 @@ export class BakeoffScenario {
       id: this.id,
       name: this.name,
       description: this.description,
+
       effectors:
         this.effectors.map(
           (effector) =>
             effector.clone()
         ),
+
       frames: this.frames,
-      unreachable:
-        this.unreachable,
+      unreachable: this.unreachable,
+
+      affectedBones: [
+        ...this.affectedBones,
+      ],
     });
   }
 }
 
 /*
  * ---------------------------------------------------------
+ * AFFECTED BONE SETS
+ * ---------------------------------------------------------
+ *
+ * These are the bones the scenario is EXPECTED to allow
+ * the solver to modify.
+ *
+ * Any modification outside this set is measured as drift.
+ *
+ * NOTE:
+ * This is intentionally conservative.
+ * If a future whole-body solver legitimately needs to move
+ * the pelvis/spine to satisfy an arm task, that scenario
+ * must explicitly declare those bones as affected.
+ * ---------------------------------------------------------
+ */
+
+const LEFT_LEG_BONES = Object.freeze([
+  "LeftUpLeg",
+  "LeftLeg",
+  "LeftFoot",
+]);
+
+const RIGHT_LEG_BONES = Object.freeze([
+  "RightUpLeg",
+  "RightLeg",
+  "RightFoot",
+]);
+
+const LEFT_ARM_BONES = Object.freeze([
+  "LeftShoulder",
+  "LeftArm",
+  "LeftForeArm",
+  "LeftHand",
+]);
+
+const RIGHT_ARM_BONES = Object.freeze([
+  "RightShoulder",
+  "RightArm",
+  "RightForeArm",
+  "RightHand",
+]);
+
+const HEAD_BONES = Object.freeze([
+  "Neck",
+  "Head",
+]);
+
+const PELVIS_BONES = Object.freeze([
+  "Hips",
+]);
+
+function concatBones(...groups) {
+  return [
+    ...new Set(
+      groups.flat()
+    ),
+  ];
+}
+
+/*
+ * ---------------------------------------------------------
  * SCENARIO BUILDER
- *
- * IMPORTANT:
- * Targets are generated from the ACTUAL BasePose.
- *
- * We do not invent arbitrary world coordinates here.
- * This makes the first bake-off deterministic.
  * ---------------------------------------------------------
  */
 
@@ -382,97 +677,64 @@ export function buildScenarios(
   ];
 
   for (const name of required) {
-    if (!boneNames.has(name)) {
+    const canonical =
+      mapLogicalToCanonical(name);
+
+    if (!boneNames.has(canonical)) {
       throw new Error(
-        `Bakeoff: required bone missing: ${name}`
+        `Bakeoff: required bone missing: ${canonical}`
       );
     }
   }
 
-  skeleton.bones.forEach(
-    (bone) =>
-      bone.updateMatrixWorld(true)
+  refreshSkeletonWorldMatrices(
+    skeleton
   );
 
-  const worldPosition =
-    (name) => {
-      const bone =
-        skeleton.bones.find(
-          (item) =>
-            item.name === name
-        );
-
-      if (!bone) {
-        throw new Error(
-          `Bakeoff: bone not found: ${name}`
-        );
-      }
-
-      const result =
-        new THREE.Vector3();
-
-      bone.getWorldPosition(
-        result
-      );
-
-      return result;
-    };
-
-  const worldRotation =
-    (name) => {
-      const bone =
-        skeleton.bones.find(
-          (item) =>
-            item.name === name
-        );
-
-      if (!bone) {
-        throw new Error(
-          `Bakeoff: bone not found: ${name}`
-        );
-      }
-
-      const result =
-        new THREE.Quaternion();
-
-      bone.getWorldQuaternion(
-        result
-      );
-
-      return result;
-    };
-
-  /*
-   * Base pose positions.
-   */
-
   const leftFoot =
-    worldPosition("LeftFoot");
+    getWorldPosition(
+      skeleton,
+      "LeftFoot"
+    );
 
   const rightFoot =
-    worldPosition("RightFoot");
+    getWorldPosition(
+      skeleton,
+      "RightFoot"
+    );
 
   const leftHand =
-    worldPosition("LeftHand");
+    getWorldPosition(
+      skeleton,
+      "LeftHand"
+    );
 
   const rightHand =
-    worldPosition("RightHand");
+    getWorldPosition(
+      skeleton,
+      "RightHand"
+    );
 
   const head =
-    worldPosition("Head");
+    getWorldPosition(
+      skeleton,
+      "Head"
+    );
 
   const hips =
-    worldPosition("Hips");
+    getWorldPosition(
+      skeleton,
+      "Hips"
+    );
 
   const headRotation =
-    worldRotation("Head");
+    getWorldQuaternion(
+      skeleton,
+      "Head"
+    );
 
   /*
-   * Small deterministic offsets.
-   *
-   * They are intentionally conservative.
-   * The first bake-off tests solver architecture,
-   * not maximum reach.
+   * Conservative deterministic offsets.
    */
 
   const leftFootTarget =
@@ -501,13 +763,36 @@ export function buildScenarios(
   headTarget.x += 0.04;
 
   /*
-   * A — Base Pose
+   * IMPORTANT:
+   * C now contains a REAL orientation target.
    *
-   * No effectors.
+   * Previous version used the current rotation,
+   * which made the orientation task a no-op.
+   */
+  const headRotationTarget =
+    headRotation.clone().multiply(
+      new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0),
+        THREE.MathUtils.degToRad(10)
+      )
+    );
+
+  /*
+   * E pelvis target:
    *
-   * Purpose:
-   *   Does the solver preserve the pose
-   *   when there is nothing to solve?
+   * Deliberately moved above current hips.
+   *
+   * This is no longer a zero task.
+   */
+  const pelvisTarget =
+    hips.clone();
+
+  pelvisTarget.y += 0.03;
+
+  /*
+   * -------------------------------------------------------
+   * A — BASE POSE
+   * -------------------------------------------------------
    */
 
   const scenarioA =
@@ -518,10 +803,13 @@ export function buildScenarios(
         "No effectors. Solver must preserve BasePose.",
       effectors: [],
       frames: 1,
+      affectedBones: [],
     });
 
   /*
-   * B — Two Feet
+   * -------------------------------------------------------
+   * B — TWO FEET
+   * -------------------------------------------------------
    */
 
   const scenarioB =
@@ -530,6 +818,7 @@ export function buildScenarios(
       name: "Two Feet",
       description:
         "Simultaneous left + right foot position targets.",
+
       effectors: [
         {
           id: "foot_L",
@@ -537,22 +826,30 @@ export function buildScenarios(
           targetPos:
             leftFootTarget,
           weightPos: 1,
-          weightRot: 0,
         },
+
         {
           id: "foot_R",
           bone: "foot_R",
           targetPos:
             rightFootTarget,
           weightPos: 1,
-          weightRot: 0,
         },
       ],
+
       frames: 1,
+
+      affectedBones:
+        concatBones(
+          LEFT_LEG_BONES,
+          RIGHT_LEG_BONES
+        ),
     });
 
   /*
-   * C — Two Feet + Head
+   * -------------------------------------------------------
+   * C — TWO FEET + HEAD
+   * -------------------------------------------------------
    */
 
   const scenarioC =
@@ -560,7 +857,8 @@ export function buildScenarios(
       id: "C",
       name: "Two Feet + Head",
       description:
-        "Two feet plus simultaneous head target.",
+        "Two feet plus simultaneous head position/orientation.",
+
       effectors: [
         {
           id: "foot_L",
@@ -569,6 +867,7 @@ export function buildScenarios(
             leftFootTarget,
           weightPos: 1,
         },
+
         {
           id: "foot_R",
           bone: "foot_R",
@@ -576,30 +875,47 @@ export function buildScenarios(
             rightFootTarget,
           weightPos: 1,
         },
+
         {
           id: "head",
           bone: "head",
+
           targetPos:
             headTarget,
+
           targetRot:
-            headRotation,
+            headRotationTarget,
+
           weightPos: 0.5,
           weightRot: 0.5,
         },
       ],
+
       frames: 1,
+
+      affectedBones:
+        concatBones(
+          LEFT_LEG_BONES,
+          RIGHT_LEG_BONES,
+          HEAD_BONES
+        ),
     });
 
   /*
-   * D — Two Feet + Two Hands
+   * -------------------------------------------------------
+   * D — TWO FEET + TWO HANDS
+   * -------------------------------------------------------
    */
 
   const scenarioD =
     new BakeoffScenario({
       id: "D",
-      name: "Two Feet + Two Hands",
+      name:
+        "Two Feet + Two Hands",
+
       description:
         "Four simultaneous end-effector targets.",
+
       effectors: [
         {
           id: "foot_L",
@@ -608,6 +924,7 @@ export function buildScenarios(
             leftFootTarget,
           weightPos: 1,
         },
+
         {
           id: "foot_R",
           bone: "foot_R",
@@ -615,6 +932,7 @@ export function buildScenarios(
             rightFootTarget,
           weightPos: 1,
         },
+
         {
           id: "hand_L",
           bone: "hand_L",
@@ -622,6 +940,7 @@ export function buildScenarios(
             leftHandTarget,
           weightPos: 1,
         },
+
         {
           id: "hand_R",
           bone: "hand_R",
@@ -630,20 +949,34 @@ export function buildScenarios(
           weightPos: 1,
         },
       ],
+
       frames: 1,
+
+      affectedBones:
+        concatBones(
+          LEFT_LEG_BONES,
+          RIGHT_LEG_BONES,
+          LEFT_ARM_BONES,
+          RIGHT_ARM_BONES
+        ),
     });
 
   /*
-   * E — Full basic body task set
+   * -------------------------------------------------------
+   * E — FULL BASIC BODY TASK SET
+   * -------------------------------------------------------
    */
 
   const scenarioE =
     new BakeoffScenario({
       id: "E",
+
       name:
         "Feet + Hands + Head + Pelvis",
+
       description:
         "Six simultaneous body requirements.",
+
       effectors: [
         {
           id: "foot_L",
@@ -652,6 +985,7 @@ export function buildScenarios(
             leftFootTarget,
           weightPos: 1,
         },
+
         {
           id: "foot_R",
           bone: "foot_R",
@@ -659,6 +993,7 @@ export function buildScenarios(
             rightFootTarget,
           weightPos: 1,
         },
+
         {
           id: "hand_L",
           bone: "hand_L",
@@ -666,6 +1001,7 @@ export function buildScenarios(
             leftHandTarget,
           weightPos: 1,
         },
+
         {
           id: "hand_R",
           bone: "hand_R",
@@ -673,6 +1009,7 @@ export function buildScenarios(
             rightHandTarget,
           weightPos: 1,
         },
+
         {
           id: "head",
           bone: "head",
@@ -680,30 +1017,35 @@ export function buildScenarios(
             headTarget,
           weightPos: 0.5,
         },
+
         {
           id: "pelvis",
           bone: "pelvis",
+
           targetPos:
-            hips,
+            pelvisTarget,
+
           weightPos: 0.25,
         },
       ],
+
       frames: 1,
+
+      affectedBones:
+        concatBones(
+          LEFT_LEG_BONES,
+          RIGHT_LEG_BONES,
+          LEFT_ARM_BONES,
+          RIGHT_ARM_BONES,
+          HEAD_BONES,
+          PELVIS_BONES
+        ),
     });
 
   /*
-   * F — Unreachable
-   *
-   * Deliberately impossible target.
-   *
-   * IMPORTANT:
-   * Passing F does NOT mean reaching the target.
-   *
-   * We test whether the solver fails gracefully:
-   *   - no NaN
-   *   - no explosion
-   *   - no skeleton corruption
-   *   - stable final pose
+   * -------------------------------------------------------
+   * F — UNREACHABLE HAND
+   * -------------------------------------------------------
    */
 
   const unreachableHand =
@@ -714,37 +1056,73 @@ export function buildScenarios(
   const scenarioF =
     new BakeoffScenario({
       id: "F",
+
       name:
         "Unreachable Hand",
+
       description:
         "Impossible hand target. Solver must remain stable.",
+
       effectors: [
         {
           id: "hand_L",
           bone: "hand_L",
+
           targetPos:
             unreachableHand,
+
           weightPos: 1,
         },
       ],
+
       frames: 1,
+
       unreachable: true,
+
+      affectedBones:
+        concatBones(
+          LEFT_ARM_BONES
+        ),
     });
 
   /*
-   * G — 60 frame stability
+   * -------------------------------------------------------
+   * G — 60 FRAME STABILITY
+   * -------------------------------------------------------
+   *
+   * IMPORTANT:
+   * Clone effectors.
+   *
+   * Do not share mutable Effector objects
+   * between Scenario D and G.
+   * -------------------------------------------------------
    */
 
   const scenarioG =
     new BakeoffScenario({
       id: "G",
+
       name:
         "60 Frame Stability",
+
       description:
         "Same multi-effector task for 60 frames.",
+
       effectors:
-        scenarioD.effectors,
+        scenarioD.effectors.map(
+          (effector) =>
+            effector.clone()
+        ),
+
       frames: 60,
+
+      affectedBones:
+        concatBones(
+          LEFT_LEG_BONES,
+          RIGHT_LEG_BONES,
+          LEFT_ARM_BONES,
+          RIGHT_ARM_BONES
+        ),
     });
 
   return [
@@ -760,7 +1138,7 @@ export function buildScenarios(
 
 /*
  * ---------------------------------------------------------
- * METRICS
+ * EFFECTOR ERROR
  * ---------------------------------------------------------
  */
 
@@ -772,17 +1150,22 @@ export function measureEffectorError(
     return 0;
   }
 
+  /*
+   * This first bake-off measures positional
+   * effector convergence.
+   *
+   * Orientation is still passed to the solver
+   * and will be added to the final orientation metric.
+   */
+
   if (!effector.targetPos) {
     return 0;
   }
 
   const bone =
-    skeleton.bones.find(
-      (item) =>
-        item.name ===
-        mapLogicalToCanonical(
-          effector.bone
-        )
+    findBone(
+      skeleton,
+      effector.bone
     );
 
   if (!bone) {
@@ -802,118 +1185,146 @@ export function measureEffectorError(
 }
 
 /*
- * Logical → canonical.
- *
- * Bakeoff deliberately keeps this tiny and local.
- * Full BoneMap integration will be connected by
- * the adapter layer, not by SolverCore.
+ * ---------------------------------------------------------
+ * ORIENTATION ERROR
+ * ---------------------------------------------------------
  */
 
-const LOGICAL_TO_CANONICAL =
-  Object.freeze({
-    pelvis: "Hips",
-    spine01: "Spine",
-    spine02: "Spine1",
-    chest: "Spine2",
-    neck: "Neck",
-    head: "Head",
-
-    clavicle_L:
-      "LeftShoulder",
-    upperArm_L:
-      "LeftArm",
-    foreArm_L:
-      "LeftForeArm",
-    hand_L:
-      "LeftHand",
-
-    clavicle_R:
-      "RightShoulder",
-    upperArm_R:
-      "RightArm",
-    foreArm_R:
-      "RightForeArm",
-    hand_R:
-      "RightHand",
-
-    thigh_L:
-      "LeftUpLeg",
-    shin_L:
-      "LeftLeg",
-    foot_L:
-      "LeftFoot",
-    toe_L:
-      "LeftToeBase",
-
-    thigh_R:
-      "RightUpLeg",
-    shin_R:
-      "RightLeg",
-    foot_R:
-      "RightFoot",
-    toe_R:
-      "RightToeBase",
-  });
-
-function mapLogicalToCanonical(
-  logicalName
+export function measureEffectorRotationError(
+  skeleton,
+  effector
 ) {
-  return (
-    LOGICAL_TO_CANONICAL[
-      logicalName
-    ] || logicalName
+  if (
+    !effector?.enabled ||
+    !effector.targetRot ||
+    effector.weightRot <= 0
+  ) {
+    return 0;
+  }
+
+  const bone =
+    findBone(
+      skeleton,
+      effector.bone
+    );
+
+  if (!bone) {
+    return Infinity;
+  }
+
+  const actual =
+    new THREE.Quaternion();
+
+  bone.getWorldQuaternion(
+    actual
+  );
+
+  return actual.angleTo(
+    effector.targetRot
   );
 }
+
+/*
+ * ---------------------------------------------------------
+ * SCENARIO MEASUREMENT
+ * ---------------------------------------------------------
+ */
 
 export function measureScenario(
   skeleton,
   scenario
 ) {
-  skeleton.bones.forEach(
-    (bone) =>
-      bone.updateMatrixWorld(true)
+  refreshSkeletonWorldMatrices(
+    skeleton
   );
 
-  const errors =
-    scenario.effectors
-      .filter(
-        (effector) =>
-          effector.enabled
-      )
-      .map(
-        (effector) =>
-          measureEffectorError(
-            skeleton,
-            effector
-          )
-      );
+  const enabledEffectors =
+    scenario.effectors.filter(
+      (effector) =>
+        effector.enabled
+    );
 
-  const finiteErrors =
-    errors.filter(
+  const positionErrors =
+    enabledEffectors.map(
+      (effector) =>
+        measureEffectorError(
+          skeleton,
+          effector
+        )
+    );
+
+  const rotationErrors =
+    enabledEffectors.map(
+      (effector) =>
+        measureEffectorRotationError(
+          skeleton,
+          effector
+        )
+    );
+
+  const finitePositionErrors =
+    positionErrors.filter(
       Number.isFinite
     );
 
-  const maxError =
-    finiteErrors.length
+  const finiteRotationErrors =
+    rotationErrors.filter(
+      Number.isFinite
+    );
+
+  const maxPositionError =
+    finitePositionErrors.length
       ? Math.max(
-          ...finiteErrors
+          ...finitePositionErrors
         )
       : Infinity;
 
-  const avgError =
-    finiteErrors.length
-      ? finiteErrors.reduce(
+  const avgPositionError =
+    finitePositionErrors.length
+      ? finitePositionErrors.reduce(
           (sum, value) =>
             sum + value,
           0
         ) /
-        finiteErrors.length
+        finitePositionErrors.length
       : Infinity;
 
+  const maxRotationError =
+    finiteRotationErrors.length
+      ? Math.max(
+          ...finiteRotationErrors
+        )
+      : 0;
+
+  const avgRotationError =
+    finiteRotationErrors.length
+      ? finiteRotationErrors.reduce(
+          (sum, value) =>
+            sum + value,
+          0
+        ) /
+        finiteRotationErrors.length
+      : 0;
+
   return {
-    maxError,
-    avgError,
-    errors,
+    maxPositionError,
+    avgPositionError,
+
+    maxRotationError,
+    avgRotationError,
+
+    positionErrors,
+    rotationErrors,
+
+    /*
+     * The primary bake-off error remains
+     * positional convergence.
+     */
+    maxError:
+      maxPositionError,
+
+    avgError:
+      avgPositionError,
   };
 }
 
@@ -957,6 +1368,141 @@ export function skeletonIsFinite(
 
 /*
  * ---------------------------------------------------------
+ * POSE RESULT VALIDATION
+ * ---------------------------------------------------------
+ */
+
+function validatePoseResult(
+  skeleton,
+  pose
+) {
+  if (!pose) {
+    return true;
+  }
+
+  const validNames =
+    new Set(
+      skeleton.bones.map(
+        (bone) =>
+          bone.name
+      )
+    );
+
+  if (
+    pose.rotations instanceof Map
+  ) {
+    for (const [
+      boneName,
+    ] of pose.rotations) {
+      if (
+        !validNames.has(
+          boneName
+        )
+      ) {
+        throw new Error(
+          `Bakeoff: solver returned unknown rotation bone: ${boneName}`
+        );
+      }
+    }
+  }
+
+  if (
+    pose.positions instanceof Map
+  ) {
+    for (const [
+      boneName,
+    ] of pose.positions) {
+      if (
+        !validNames.has(
+          boneName
+        )
+      ) {
+        throw new Error(
+          `Bakeoff: solver returned unknown position bone: ${boneName}`
+        );
+      }
+    }
+  }
+
+  return true;
+}
+
+/*
+ * ---------------------------------------------------------
+ * POSE RESULT APPLICATION
+ * ---------------------------------------------------------
+ */
+
+function applyPoseResult(
+  skeleton,
+  pose
+) {
+  if (!pose) {
+    return;
+  }
+
+  validatePoseResult(
+    skeleton,
+    pose
+  );
+
+  if (
+    pose.rotations instanceof Map
+  ) {
+    for (const [
+      boneName,
+      rotation,
+    ] of pose.rotations) {
+      const bone =
+        skeleton.bones.find(
+          (item) =>
+            item.name ===
+            boneName
+        );
+
+      if (
+        bone &&
+        rotation
+      ) {
+        bone.quaternion.copy(
+          rotation
+        );
+      }
+    }
+  }
+
+  if (
+    pose.positions instanceof Map
+  ) {
+    for (const [
+      boneName,
+      position,
+    ] of pose.positions) {
+      const bone =
+        skeleton.bones.find(
+          (item) =>
+            item.name ===
+            boneName
+        );
+
+      if (
+        bone &&
+        position
+      ) {
+        bone.position.copy(
+          position
+        );
+      }
+    }
+  }
+
+  refreshSkeletonWorldMatrices(
+    skeleton
+  );
+}
+
+/*
+ * ---------------------------------------------------------
  * BAKEOFF RESULT
  * ---------------------------------------------------------
  */
@@ -980,10 +1526,29 @@ export class BakeoffResult {
     this.avgError =
       Infinity;
 
-    this.basePoseRotationDrift =
+    this.maxRotationError =
       0;
 
-    this.basePosePositionDrift =
+    this.avgRotationError =
+      0;
+
+    /*
+     * Drift is measured ONLY against
+     * unaffected bones.
+     */
+    this.unaffectedRotationDrift =
+      0;
+
+    this.unaffectedPositionDrift =
+      0;
+
+    /*
+     * Keep total drift separately for diagnostics.
+     */
+    this.totalRotationDrift =
+      0;
+
+    this.totalPositionDrift =
       0;
 
     this.drift60 =
@@ -992,6 +1557,15 @@ export class BakeoffResult {
     this.jitter =
       0;
 
+    this.solveTimeMs =
+      0;
+
+    this.totalTimeMs =
+      0;
+
+    /*
+     * Backwards-compatible alias.
+     */
     this.timeMs =
       0;
 
@@ -1008,12 +1582,6 @@ export class BakeoffResult {
 /*
  * ---------------------------------------------------------
  * ADAPTER CONTRACT
- * ---------------------------------------------------------
- *
- * This is deliberately a JavaScript runtime contract
- * rather than a TypeScript interface.
- *
- * Any solver must implement these methods.
  * ---------------------------------------------------------
  */
 
@@ -1038,7 +1606,9 @@ export function validateSolverAdapter(
 
   if (missing.length > 0) {
     throw new Error(
-      `SolverAdapter invalid — missing: ${missing.join(", ")}`
+      `SolverAdapter invalid — missing: ${missing.join(
+        ", "
+      )}`
     );
   }
 
@@ -1076,9 +1646,8 @@ export function runScenario({
   }
 
   /*
-   * Restore clean BasePose before every scenario.
+   * Clean starting state.
    */
-
   basePose.apply(
     skeleton
   );
@@ -1088,43 +1657,47 @@ export function runScenario({
     boneMap
   );
 
+  /*
+   * Solver gets a CLONE.
+   */
   adapter.setPose(
     basePose.clone()
   );
 
   adapter.setEffectors(
     scenario.effectors.map(
-      (effector) =>
-        ({
-          id: effector.id,
-          bone: effector.bone,
-          targetPos:
-            effector.targetPos
-              ? effector.targetPos.clone()
-              : null,
-          targetRot:
-            effector.targetRot
-              ? effector.targetRot.clone()
-              : null,
-          weightPos:
-            effector.weightPos,
-          weightRot:
-            effector.weightRot,
-          enabled:
-            effector.enabled,
-        })
+      (effector) => ({
+        id: effector.id,
+
+        bone:
+          effector.bone,
+
+        targetPos:
+          effector.targetPos
+            ? effector.targetPos.clone()
+            : null,
+
+        targetRot:
+          effector.targetRot
+            ? effector.targetRot.clone()
+            : null,
+
+        weightPos:
+          effector.weightPos,
+
+        weightRot:
+          effector.weightRot,
+
+        enabled:
+          effector.enabled,
+      })
     )
   );
 
   /*
-   * Constraints are intentionally empty
-   * for the first mathematical comparison.
-   *
-   * Joint limits will become a separate
-   * bake-off dimension after multi-effector
-   * capability is established.
+   * Constraints intentionally empty
+   * in this first solver bake-off.
    */
-
   adapter.setConstraints(
     []
   );
@@ -1134,13 +1707,14 @@ export function runScenario({
       solverName:
         adapter.name ||
         "Unnamed Solver",
+
       scenarioId:
         scenario.id,
     });
 
   const frameErrors = [];
 
-  const start =
+  const totalStart =
     performance.now();
 
   for (
@@ -1148,18 +1722,26 @@ export function runScenario({
     frame < scenario.frames;
     frame++
   ) {
+    /*
+     * Measure ONLY actual solver call.
+     */
+    const solveStart =
+      performance.now();
+
     const stats =
       adapter.solve(
         dt
       );
 
-    const pose =
-      adapter.getPoseResult();
+    result.solveTimeMs +=
+      performance.now() -
+      solveStart;
 
     /*
-     * Adapter owns translation from solver pose
-     * back into the skeleton.
+     * Adapter returns resolved pose.
      */
+    const pose =
+      adapter.getPoseResult();
 
     if (pose) {
       applyPoseResult(
@@ -1168,9 +1750,8 @@ export function runScenario({
       );
     }
 
-    skeleton.bones.forEach(
-      (bone) =>
-        bone.updateMatrixWorld(true)
+    refreshSkeletonWorldMatrices(
+      skeleton
     );
 
     const measurement =
@@ -1186,16 +1767,37 @@ export function runScenario({
     result.frames =
       frame + 1;
 
-    result.maxError =
-      Math.max(
-        result.maxError === Infinity
-          ? 0
-          : result.maxError,
+    if (
+      Number.isFinite(
         measurement.maxError
-      );
+      )
+    ) {
+      if (
+        result.maxError ===
+        Infinity
+      ) {
+        result.maxError =
+          measurement.maxError;
+      } else {
+        result.maxError =
+          Math.max(
+            result.maxError,
+            measurement.maxError
+          );
+      }
+    }
 
     result.avgError =
       measurement.avgError;
+
+    result.maxRotationError =
+      Math.max(
+        result.maxRotationError,
+        measurement.maxRotationError
+      );
+
+    result.avgRotationError =
+      measurement.avgRotationError;
 
     result.finite =
       result.finite &&
@@ -1204,23 +1806,55 @@ export function runScenario({
       );
 
     /*
-     * Base-pose drift is meaningful
-     * only for A and for unaffected bones
-     * in later scenarios.
+     * -----------------------------------------------------
+     * DRIFT
+     * -----------------------------------------------------
+     *
+     * Affected bones are expected to move.
+     *
+     * Unaffected bones are NOT expected to move.
+     *
+     * Therefore:
+     *
+     *   unaffectedRotationDrift
+     *   unaffectedPositionDrift
+     *
+     * are the architectural preservation metrics.
      */
 
-    result.basePoseRotationDrift =
+    result.unaffectedRotationDrift =
       Math.max(
-        result.basePoseRotationDrift,
+        result.unaffectedRotationDrift,
         basePose.maxRotationDrift(
+          skeleton,
+          scenario.affectedBones
+        )
+      );
+
+    result.unaffectedPositionDrift =
+      Math.max(
+        result.unaffectedPositionDrift,
+        basePose.maxPositionDrift(
+          skeleton,
+          scenario.affectedBones
+        )
+      );
+
+    /*
+     * Diagnostic total drift.
+     */
+    result.totalRotationDrift =
+      Math.max(
+        result.totalRotationDrift,
+        basePose.maxRotationDriftAll(
           skeleton
         )
       );
 
-    result.basePosePositionDrift =
+    result.totalPositionDrift =
       Math.max(
-        result.basePosePositionDrift,
-        basePose.maxPositionDrift(
+        result.totalPositionDrift,
+        basePose.maxPositionDriftAll(
           skeleton
         )
       );
@@ -1232,17 +1866,37 @@ export function runScenario({
 
       break;
     }
+
+    /*
+     * If solver supplied stats, preserve useful
+     * diagnostics without trusting them for our metrics.
+     */
+    if (
+      stats &&
+      Number.isFinite(
+        stats.maxError
+      )
+    ) {
+      result.notes.push(
+        `solverStats.maxError=${stats.maxError}`
+      );
+    }
   }
 
-  result.timeMs =
+  result.totalTimeMs =
     performance.now() -
-    start;
+    totalStart;
 
   /*
-   * 60-frame drift:
-   *
-   * difference between first and final
-   * measured max error.
+   * Backwards-compatible field.
+   */
+  result.timeMs =
+    result.totalTimeMs;
+
+  /*
+   * -------------------------------------------------------
+   * 60 FRAME DRIFT
+   * -------------------------------------------------------
    */
 
   if (
@@ -1258,15 +1912,14 @@ export function runScenario({
   }
 
   /*
-   * Jitter:
+   * -------------------------------------------------------
+   * JITTER
+   * -------------------------------------------------------
    *
-   * simple frame-to-frame error variation.
+   * First-order variation of measured error.
    *
-   * This is intentionally conservative.
-   * Later we can replace it with
-   * positional velocity variance.
+   * This is intentionally simple for Gate 1.
    */
-
   if (
     frameErrors.length >= 3
   ) {
@@ -1277,6 +1930,17 @@ export function runScenario({
       i < frameErrors.length;
       i++
     ) {
+      if (
+        !Number.isFinite(
+          frameErrors[i]
+        ) ||
+        !Number.isFinite(
+          frameErrors[i - 1]
+        )
+      ) {
+        continue;
+      }
+
       totalVariation +=
         Math.abs(
           frameErrors[i] -
@@ -1286,11 +1950,18 @@ export function runScenario({
 
     result.jitter =
       totalVariation /
-      (
-        frameErrors.length - 1
-      );
+      (frameErrors.length - 1);
   }
 
+  /*
+   * -------------------------------------------------------
+   * CONVERGENCE
+   * -------------------------------------------------------
+   *
+   * F is intentionally exempt from convergence.
+   *
+   * F passes if it remains finite and stable.
+   */
   result.converged =
     result.finite &&
     Number.isFinite(
@@ -1303,10 +1974,20 @@ export function runScenario({
     );
 
   /*
-   * Restore BasePose AFTER the scenario.
+   * -------------------------------------------------------
+   * RESTORE
+   * -------------------------------------------------------
    *
-   * This guarantees that the next solver/scenario
-   * starts from exactly the same state.
+   * CRITICAL:
+   *
+   * Direct local transform restore.
+   *
+   * NEVER:
+   *
+   *   skeleton.pose()
+   *   skeleton.update()
+   *
+   * -------------------------------------------------------
    */
 
   basePose.apply(
@@ -1314,107 +1995,6 @@ export function runScenario({
   );
 
   return result;
-}
-
-/*
- * ---------------------------------------------------------
- * POSE RESULT APPLICATION
- * ---------------------------------------------------------
- */
-
-function applyPoseResult(
-  skeleton,
-  pose
-) {
-  if (!pose) {
-    return;
-  }
-
-  const rotations =
-    pose.rotations;
-
-  const positions =
-    pose.positions;
-
-  if (rotations instanceof Map) {
-    for (
-      const [
-        boneName,
-        rotation,
-      ] of rotations
-    ) {
-      const bone =
-        skeleton.bones.find(
-          (item) =>
-            item.name === boneName
-        );
-
-      if (
-        bone &&
-        rotation
-      ) {
-        bone.quaternion.copy(
-          rotation
-        );
-      }
-    }
-  }
-
-  if (positions instanceof Map) {
-    for (
-      const [
-        boneName,
-        position,
-      ] of positions
-    ) {
-      const bone =
-        skeleton.bones.find(
-          (item) =>
-            item.name === boneName
-        );
-
-      if (
-        bone &&
-        position
-      ) {
-        bone.position.copy(
-          position
-        );
-      }
-    }
-  }
-}
-
-/*
- * ---------------------------------------------------------
- * REPORT
- * ---------------------------------------------------------
- */
-
-export function formatResult(
-  result
-) {
-  return [
-    `${result.solverName} / ${result.scenarioId}`,
-    `frames=${result.frames}`,
-    `maxError=${formatNumber(result.maxError)}`,
-    `avgError=${formatNumber(result.avgError)}`,
-    `baseRotDrift=${formatNumber(result.basePoseRotationDrift)}`,
-    `basePosDrift=${formatNumber(result.basePosePositionDrift)}`,
-    `drift60=${formatNumber(result.drift60)}`,
-    `jitter=${formatNumber(result.jitter)}`,
-    `timeMs=${formatNumber(result.timeMs)}`,
-    `finite=${result.finite}`,
-    `converged=${result.converged}`,
-  ].join(" | ");
-}
-
-function formatNumber(
-  value
-) {
-  return Number.isFinite(value)
-    ? value.toFixed(6)
-    : "INF";
 }
 
 /*
@@ -1493,7 +2073,6 @@ export function runBakeoff({
   /*
    * Absolute final restore.
    */
-
   basePose.apply(
     skeleton
   );
@@ -1524,7 +2103,81 @@ export function runBakeoff({
 
 /*
  * ---------------------------------------------------------
- * REPORT TO CONSOLE
+ * FORMAT RESULT
+ * ---------------------------------------------------------
+ */
+
+export function formatResult(
+  result
+) {
+  return [
+    `${result.solverName} / ${result.scenarioId}`,
+
+    `frames=${result.frames}`,
+
+    `maxError=${formatNumber(
+      result.maxError
+    )}`,
+
+    `avgError=${formatNumber(
+      result.avgError
+    )}`,
+
+    `maxRotError=${formatNumber(
+      result.maxRotationError
+    )}`,
+
+    `unaffectedRotDrift=${formatNumber(
+      result.unaffectedRotationDrift
+    )}`,
+
+    `unaffectedPosDrift=${formatNumber(
+      result.unaffectedPositionDrift
+    )}`,
+
+    `totalRotDrift=${formatNumber(
+      result.totalRotationDrift
+    )}`,
+
+    `totalPosDrift=${formatNumber(
+      result.totalPositionDrift
+    )}`,
+
+    `drift60=${formatNumber(
+      result.drift60
+    )}`,
+
+    `jitter=${formatNumber(
+      result.jitter
+    )}`,
+
+    `solveMs=${formatNumber(
+      result.solveTimeMs
+    )}`,
+
+    `totalMs=${formatNumber(
+      result.totalTimeMs
+    )}`,
+
+    `finite=${result.finite}`,
+
+    `converged=${result.converged}`,
+  ].join(
+    " | "
+  );
+}
+
+function formatNumber(
+  value
+) {
+  return Number.isFinite(value)
+    ? value.toFixed(6)
+    : "INF";
+}
+
+/*
+ * ---------------------------------------------------------
+ * CONSOLE REPORT
  * ---------------------------------------------------------
  */
 
@@ -1563,60 +2216,58 @@ export function printBakeoffReport(
           result.frames,
 
         maxError:
-          Number.isFinite(
+          finiteOrNull(
             result.maxError
-          )
-            ? Number(
-                result.maxError.toFixed(
-                  6
-                )
-              )
-            : null,
-
-        avgError:
-          Number.isFinite(
-            result.avgError
-          )
-            ? Number(
-                result.avgError.toFixed(
-                  6
-                )
-              )
-            : null,
-
-        baseRotDrift:
-          Number(
-            result.basePoseRotationDrift.toFixed(
-              6
-            )
           ),
 
-        basePosDrift:
-          Number(
-            result.basePosePositionDrift.toFixed(
-              6
-            )
+        avgError:
+          finiteOrNull(
+            result.avgError
+          ),
+
+        maxRotError:
+          finiteOrNull(
+            result.maxRotationError
+          ),
+
+        unaffectedRotDrift:
+          finiteOrNull(
+            result.unaffectedRotationDrift
+          ),
+
+        unaffectedPosDrift:
+          finiteOrNull(
+            result.unaffectedPositionDrift
+          ),
+
+        totalRotDrift:
+          finiteOrNull(
+            result.totalRotationDrift
+          ),
+
+        totalPosDrift:
+          finiteOrNull(
+            result.totalPositionDrift
           ),
 
         drift60:
-          Number(
-            result.drift60.toFixed(
-              6
-            )
+          finiteOrNull(
+            result.drift60
           ),
 
         jitter:
-          Number(
-            result.jitter.toFixed(
-              6
-            )
+          finiteOrNull(
+            result.jitter
           ),
 
-        timeMs:
-          Number(
-            result.timeMs.toFixed(
-              3
-            )
+        solveMs:
+          finiteOrNull(
+            result.solveTimeMs
+          ),
+
+        totalMs:
+          finiteOrNull(
+            result.totalTimeMs
           ),
 
         finite:
@@ -1643,6 +2294,16 @@ export function printBakeoffReport(
   return report;
 }
 
+function finiteOrNull(
+  value
+) {
+  return Number.isFinite(value)
+    ? Number(
+        value.toFixed(6)
+      )
+    : null;
+}
+
 /*
  * ---------------------------------------------------------
  * DIAGNOSTIC SUMMARY
@@ -1656,8 +2317,7 @@ export function createBakeoffSummary(
     version:
       report.version,
 
-    solvers:
-      {},
+    solvers: {},
 
     totalRuns:
       report.results.length,
@@ -1675,9 +2335,25 @@ export function createBakeoffSummary(
         result.solverName
       ] = {
         runs: 0,
+
         finite: 0,
+
         converged: 0,
+
         maxError: 0,
+
+        maxRotationError: 0,
+
+        maxUnaffectedRotationDrift: 0,
+
+        maxUnaffectedPositionDrift: 0,
+
+        maxDrift60: 0,
+
+        maxJitter: 0,
+
+        totalSolveTimeMs: 0,
+
         totalTimeMs: 0,
       };
     }
@@ -1709,8 +2385,71 @@ export function createBakeoffSummary(
         );
     }
 
+    if (
+      Number.isFinite(
+        result.maxRotationError
+      )
+    ) {
+      solver.maxRotationError =
+        Math.max(
+          solver.maxRotationError,
+          result.maxRotationError
+        );
+    }
+
+    if (
+      Number.isFinite(
+        result.unaffectedRotationDrift
+      )
+    ) {
+      solver.maxUnaffectedRotationDrift =
+        Math.max(
+          solver.maxUnaffectedRotationDrift,
+          result.unaffectedRotationDrift
+        );
+    }
+
+    if (
+      Number.isFinite(
+        result.unaffectedPositionDrift
+      )
+    ) {
+      solver.maxUnaffectedPositionDrift =
+        Math.max(
+          solver.maxUnaffectedPositionDrift,
+          result.unaffectedPositionDrift
+        );
+    }
+
+    if (
+      Number.isFinite(
+        result.drift60
+      )
+    ) {
+      solver.maxDrift60 =
+        Math.max(
+          solver.maxDrift60,
+          result.drift60
+        );
+    }
+
+    if (
+      Number.isFinite(
+        result.jitter
+      )
+    ) {
+      solver.maxJitter =
+        Math.max(
+          solver.maxJitter,
+          result.jitter
+        );
+    }
+
+    solver.totalSolveTimeMs +=
+      result.solveTimeMs;
+
     solver.totalTimeMs +=
-      result.timeMs;
+      result.totalTimeMs;
   }
 
   return summary;
@@ -1724,24 +2463,40 @@ export function createBakeoffSummary(
 
 export default {
   BAKEOFF_VERSION,
+
   BAKEOFF_SCENARIOS,
+
   BAKEOFF_THRESHOLDS,
 
   PoseSnapshot,
+
   BakeoffEffector,
+
   BakeoffScenario,
+
   BakeoffResult,
 
   buildScenarios,
+
   measureScenario,
+
   measureEffectorError,
+
+  measureEffectorRotationError,
+
   skeletonIsFinite,
 
+  refreshSkeletonWorldMatrices,
+
   validateSolverAdapter,
+
   runScenario,
+
   runBakeoff,
 
   formatResult,
+
   printBakeoffReport,
+
   createBakeoffSummary,
 };
