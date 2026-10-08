@@ -552,6 +552,25 @@ export class ContactPerception {
        */
       minY: Infinity,
       maxY: -Infinity,
+
+      /*
+       * Reset baked/runtime probe state without reallocating
+       * the fixed buffers or Vector3 objects.
+       */
+      reset() {
+        this.count = 0;
+        this.vertexCount = 0;
+        this.minY = Infinity;
+        this.maxY = -Infinity;
+
+        this.vertices.fill(0);
+
+        for (let i = 0; i < this.samples.length; i++) {
+          this.samples[i].set(0, 0, 0);
+        }
+
+        return this;
+      },
     };
   }
 
