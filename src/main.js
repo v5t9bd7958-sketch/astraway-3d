@@ -1,4 +1,7 @@
+// src/main.js
+
 import * as THREE from "three";
+
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { canonicalizeGLBBones } from "@three-ws/retarget";
@@ -19,7 +22,9 @@ import { ContactTaskGenerator } from "./character/ContactTaskGenerator.js";
 import { TaskResolver } from "./character/TaskResolver.js";
 import { ConstraintSet } from "./character/ConstraintSet.js";
 import { TaskConstraintBuilder } from "./character/TaskConstraintBuilder.js";
+
 import { ConstraintSolver } from "./character/ConstraintSolver.js";
+import { PoseWriter } from "./character/PoseWriter.js";
 
 import {
   runClosedChainViability,
@@ -28,6 +33,12 @@ import {
 import {
   runClosedChainMultiEffector,
 } from "./solver-bakeoff/ClosedChainMultiEffector.js";
+
+/*
+ * =======================================================
+ * VIEW
+ * =======================================================
+ */
 
 const canvas =
   document.querySelector("#viewer");
@@ -72,7 +83,9 @@ const scene =
   new THREE.Scene();
 
 scene.background =
-  new THREE.Color(0x090b10);
+  new THREE.Color(
+    0x090b10
+  );
 
 const camera =
   new THREE.PerspectiveCamera(
@@ -142,6 +155,12 @@ ground.rotation.x =
 
 scene.add(ground);
 
+/*
+ * =======================================================
+ * MODEL
+ * =======================================================
+ */
+
 const loader =
   new GLTFLoader();
 
@@ -153,81 +172,79 @@ const MODEL_URL =
   `${import.meta.env.BASE_URL}models/Xbot.glb`;
 
 let model = null;
+
 let skinnedMesh = null;
+
 let skeleton = null;
 
 /*
- * -------------------------------------------------------
- * BODY STATE + TASK RUNTIME
- * -------------------------------------------------------
+ * =======================================================
+ * BODY / TASK / CONSTRAINT PIPELINE
+ * =======================================================
  */
 
 let bodyState = null;
+
 let bodyStateBinder = null;
 
 let taskSet = null;
+
 let contactTaskGenerator = null;
+
 let taskResolver = null;
+
 let constraintSet = null;
+
 let taskConstraintBuilder = null;
+
 let resolvedTaskPlan = null;
 
 /*
- * -------------------------------------------------------
- * CONSTRAINT SOLVER
- * -------------------------------------------------------
- *
- * Pipeline:
- *
- * BodyState
- *    ↓
- * ContactState
- *    ↓
- * TaskSet
- *    ↓
- * TaskResolver
- *    ↓
- * ConstraintSet
- *    ↓
- * ConstraintSolver
- *
- * ConstraintSolver пока НЕ пишет
- * в Skeleton.
- *
- * Он только принимает
- * ConstraintSet и формирует
- * нормализованный solver input.
+ * Production solver.
  */
-
 let constraintSolver = null;
+
+/*
+ * Единственный production pose writer.
+ */
+let poseWriter = null;
+
 let solverResult = null;
 
+let poseWriteResult = null;
+
 let bodyStateFrames = 0;
+
 let bodyStateLastReport = 0;
 
 /*
- * -------------------------------------------------------
- * IK GATE 7
- * -------------------------------------------------------
+ * =======================================================
+ * GATE 7
+ * =======================================================
  */
 
 let ikSolver = null;
+
 let ikTarget = null;
+
 let ikMarker = null;
 
 let ikFrames = 0;
+
 let ikFinished = false;
 
 let ikInitialError = 0;
+
 let ikInitialFoot = null;
+
 let ikTargetPosition = null;
 
 const IK_TEST_FRAMES = 60;
 
 /*
- * -------------------------------------------------------
+ * =======================================================
  * STATUS
- * -------------------------------------------------------
+ * =======================================================
  */
 
 function setStatus(message) {
@@ -240,9 +257,9 @@ function setStatus(message) {
 }
 
 /*
- * -------------------------------------------------------
+ * =======================================================
  * UTILS
- * -------------------------------------------------------
+ * =======================================================
  */
 
 function timeout(
@@ -273,7 +290,8 @@ function toArrayBuffer(
   value
 ) {
   if (
-    value instanceof ArrayBuffer
+    value instanceof
+    ArrayBuffer
   ) {
     return value;
   }
@@ -312,9 +330,9 @@ function findBone(
 }
 
 /*
- * -------------------------------------------------------
- * CAMERA / MODEL FRAMING
- * -------------------------------------------------------
+ * =======================================================
+ * CAMERA
+ * =======================================================
  */
 
 function frameModel(
@@ -371,9 +389,9 @@ function frameModel(
 }
 
 /*
- * -------------------------------------------------------
+ * =======================================================
  * POSE GATE
- * -------------------------------------------------------
+ * =======================================================
  */
 
 function runPoseGate(
@@ -553,8 +571,10 @@ function runPoseGate(
 
   return {
     passed,
+
     total:
       checks.length,
+
     pass:
       passed ===
       checks.length,
@@ -562,9 +582,9 @@ function runPoseGate(
 }
 
 /*
- * -------------------------------------------------------
- * CONTROLLED POSE TEST
- * -------------------------------------------------------
+ * =======================================================
+ * CONTROLLED POSE
+ * =======================================================
  */
 
 function runControlledPoseTest(
@@ -689,8 +709,10 @@ function runControlledPoseTest(
 
   return {
     passed,
+
     total:
       tests.length,
+
     pass:
       passed ===
       tests.length,
@@ -698,9 +720,9 @@ function runControlledPoseTest(
 }
 
 /*
- * -------------------------------------------------------
- * GATE 7 — THREE.JS CCD IK
- * -------------------------------------------------------
+ * =======================================================
+ * GATE 7 — CCD IK
+ * =======================================================
  */
 
 function prepareIKGate(
@@ -765,16 +787,6 @@ function prepareIKGate(
       foot
     );
 
-  if (
-    thighIndex < 0 ||
-    shinIndex < 0 ||
-    footIndex < 0
-  ) {
-    throw new Error(
-      "IK bone indices invalid"
-    );
-  }
-
   root.updateMatrixWorld(
     true
   );
@@ -804,10 +816,6 @@ function prepareIKGate(
 
   scene.add(
     ikTarget
-  );
-
-  root.updateMatrixWorld(
-    true
   );
 
   scene.updateMatrixWorld(
@@ -903,10 +911,6 @@ function updateIKGate() {
     ikFrames <
     IK_TEST_FRAMES
   ) {
-    setStatus(
-      `9/10 — IK Gate 7 ${ikFrames}/${IK_TEST_FRAMES}`
-    );
-
     return;
   }
 
@@ -953,28 +957,25 @@ function updateIKGate() {
     moved > 0.0001 &&
     improvement > 0.0001;
 
-  setStatus(
-    pass
-      ? `IK GATE GREEN — foot moved ${moved.toFixed(4)} | error ${ikInitialError.toFixed(4)} → ${finalError.toFixed(4)}`
-      : `IK GATE RED — moved ${moved.toFixed(4)} | error ${ikInitialError.toFixed(4)} → ${finalError.toFixed(4)}`
-  );
-
   console.log(
     "[AstraWay] IK GATE 7",
     {
       initialError:
         ikInitialError,
+
       finalError,
+
       improvement,
+
       moved,
     }
   );
 }
 
 /*
- * -------------------------------------------------------
- * BODY STATE + CONTACT TASKS + CONSTRAINT SOLVER
- * -------------------------------------------------------
+ * =======================================================
+ * BODY STATE INITIALIZATION
+ * =======================================================
  */
 
 function initializeBodyState(
@@ -990,18 +991,28 @@ function initializeBodyState(
   bodyStateBinder =
     new BodyStateBinder({
       root,
+
       skeleton,
+
       bodyState,
+
       groundY:
         box.min.y,
+
       contactDistance:
         0.08,
+
       contactVelocityThreshold:
         0.35,
     });
 
   taskSet =
     new TaskSet();
+
+  contactTaskGenerator =
+    new ContactTaskGenerator({
+      taskSet,
+    });
 
   taskResolver =
     new TaskResolver();
@@ -1015,50 +1026,74 @@ function initializeBodyState(
     });
 
   /*
-   * ConstraintSolver получает
-   * тот же Skeleton, который
-   * используется BodyStateBinder.
-   *
-   * Пока solver только готовит
-   * solver input.
-   *
-   * Он НЕ пишет в кости.
+   * REAL DLS SOLVER
    */
   constraintSolver =
     new ConstraintSolver({
       skeleton,
+
+      damping:
+        0.12,
+
+      maxIterations:
+        4,
+
+      maxChainBones:
+        12,
+
+      positionTolerance:
+        0.001,
+
+      maxStepRadians:
+        0.18,
     });
 
-  resolvedTaskPlan = null;
-  solverResult = null;
+  /*
+   * ONLY production pose writer.
+   */
+  poseWriter =
+    new PoseWriter({
+      skeleton,
 
-  contactTaskGenerator =
-    new ContactTaskGenerator({
-      taskSet,
+      enabled:
+        true,
+
+      maxRotationPerBone:
+        0.18,
     });
 
-  bodyStateFrames = 0;
-  bodyStateLastReport = 0;
+  resolvedTaskPlan =
+    null;
+
+  solverResult =
+    null;
+
+  poseWriteResult =
+    null;
+
+  bodyStateFrames =
+    0;
+
+  bodyStateLastReport =
+    0;
 
   console.log(
-    "[AstraWay] BodyState initialized",
+    "[AstraWay] Production runtime initialized",
     {
-      groundY:
-        box.min.y,
-
-      contacts:
-        [
-          ...bodyState.contacts.keys(),
-        ],
-
-      tasks:
-        taskSet.count(),
-
       solver:
         constraintSolver.snapshot(),
+
+      writer:
+        poseWriter.snapshot(),
     }
   );
 }
+
+/*
+ * =======================================================
+ * BODY → TASK → CONSTRAINT → DLS → POSE
+ * =======================================================
+ */
 
 function updateBodyState(
   dt
@@ -1071,7 +1106,8 @@ function updateBodyState(
     !taskResolver ||
     !constraintSet ||
     !taskConstraintBuilder ||
-    !constraintSolver
+    !constraintSolver ||
+    !poseWriter
   ) {
     return;
   }
@@ -1079,10 +1115,10 @@ function updateBodyState(
   /*
    * 1.
    *
-   * Skeleton
-   *    ↓
+   * CURRENT SKELETON
+   *      ↓
    * BodyStateBinder
-   *    ↓
+   *      ↓
    * BodyState + ContactState
    */
   bodyStateBinder.update(
@@ -1093,9 +1129,9 @@ function updateBodyState(
    * 2.
    *
    * ContactState
-   *    ↓
+   *      ↓
    * ContactTaskGenerator
-   *    ↓
+   *      ↓
    * TaskSet
    */
   contactTaskGenerator.update(
@@ -1106,9 +1142,9 @@ function updateBodyState(
    * 3.
    *
    * TaskSet
-   *    ↓
+   *      ↓
    * TaskResolver
-   *    ↓
+   *      ↓
    * ResolvedTaskPlan
    */
   resolvedTaskPlan =
@@ -1120,9 +1156,9 @@ function updateBodyState(
    * 4.
    *
    * ResolvedTaskPlan
-   *    ↓
+   *      ↓
    * TaskConstraintBuilder
-   *    ↓
+   *      ↓
    * ConstraintSet
    */
   taskConstraintBuilder.update(
@@ -1133,30 +1169,59 @@ function updateBodyState(
    * 5.
    *
    * ConstraintSet
-   *    ↓
-   * ConstraintSolver
-   *    ↓
+   *      ↓
+   * REAL DLS
+   *      ↓
    * SolverResult
    *
-   * ВАЖНО:
-   * здесь ещё нет изменения позы.
+   * Solver НЕ пишет в Skeleton.
    */
   solverResult =
     constraintSolver.solve(
       constraintSet,
       {
         dt,
+
         time:
           performance.now() /
           1000,
       }
     );
 
-  bodyStateFrames++;
+  /*
+   * 6.
+   *
+   * SolverResult
+   *      ↓
+   * PoseWriter
+   *      ↓
+   * Bone local quaternion
+   *
+   * Это единственная запись
+   * production solver pipeline.
+   */
+  poseWriteResult =
+    poseWriter.write(
+      solverResult
+    );
 
   /*
-   * Не спамим DOM каждый кадр.
+   * 7.
+   *
+   * После записи позы
+   * обновляем world matrices.
+   *
+   * Следующий кадр снова
+   * измерит фактическое состояние.
    */
+  if (model) {
+    model.updateMatrixWorld(
+      true
+    );
+  }
+
+  bodyStateFrames++;
+
   const now =
     performance.now();
 
@@ -1196,7 +1261,9 @@ function updateBodyState(
     bodyState.getBalanceError();
 
   const balanceText =
-    Number.isFinite(balance)
+    Number.isFinite(
+      balance
+    )
       ? balance.toFixed(3)
       : "INF";
 
@@ -1207,71 +1274,42 @@ function updateBodyState(
     solverResult?.status ??
     "none";
 
-  const solverConstraints =
-    solverResult?.constraints ??
+  const poseDelta =
+    solverResult?.pose?.length ??
+    0;
+
+  const conflicts =
+    resolvedTaskPlan
+      ?.conflicts?.length ??
     0;
 
   setStatus(
-    `BODY STATE GREEN — ` +
+    `DLS ${solverStatus.toUpperCase()} | ` +
+    `tasks ${taskSet.enabledCount()} | ` +
+    `hard ${resolvedTaskPlan?.hard.length ?? 0} | ` +
+    `soft ${resolvedTaskPlan?.soft.length ?? 0} | ` +
+    `constraints ${constraintSet.enabledCount()} | ` +
+    `conflicts ${conflicts} | ` +
+    `poseDelta ${poseDelta} | ` +
+    `written ${poseWriteResult?.applied ?? 0} | ` +
     `COM ${com.x.toFixed(2)},${com.y.toFixed(2)},${com.z.toFixed(2)} | ` +
     `L ${leftPhase} | ` +
     `R ${rightPhase} | ` +
     `support ${support} | ` +
-    `balance ${balanceText} | ` +
-    `tasks ${taskSet.enabledCount()} | ` +
-    `hard ${resolvedTaskPlan?.hard.length ?? 0} | ` +
-    `constraints ${constraintSet.enabledCount()} | ` +
-    `solver ${solverStatus}:${solverConstraints} | ` +
-    `conflicts ${resolvedTaskPlan?.conflicts.length ?? 0}`
+    `balance ${balanceText}`
   );
 
   if (
     bodyStateFrames ===
-    1 ||
+      1 ||
     bodyStateFrames % 60 ===
-    0
+      0
   ) {
     console.log(
-      "[AstraWay] BODY STATE",
+      "[AstraWay] PRODUCTION SOLVER",
       {
         frame:
           bodyStateFrames,
-
-        position:
-          bodyState.position.toArray(),
-
-        velocity:
-          bodyState.velocity.toArray(),
-
-        com:
-          bodyState.com.toArray(),
-
-        comVelocity:
-          bodyState.comVelocity.toArray(),
-
-        supportCount:
-          bodyState.supportCount,
-
-        supportPolygon:
-          bodyState.supportPolygon.map(
-            (p) =>
-              p.toArray()
-          ),
-
-        balanceError:
-          bodyState.balanceError,
-
-        grounded:
-          bodyState.grounded,
-
-        stable:
-          bodyState.stable,
-
-        leftFoot:
-          leftPhase,
-
-        rightFoot:
-          rightPhase,
 
         tasks:
           taskSet.snapshot(),
@@ -1285,17 +1323,19 @@ function updateBodyState(
         solver:
           constraintSolver.snapshot(),
 
-        solverResult:
-          solverResult,
+        solverResult,
+
+        writer:
+          poseWriter.snapshot(),
       }
     );
   }
 }
 
 /*
- * -------------------------------------------------------
- * MODEL
- * -------------------------------------------------------
+ * =======================================================
+ * LOAD MODEL
+ * =======================================================
  */
 
 async function loadModel() {
@@ -1472,9 +1512,9 @@ async function loadModel() {
     );
 
     /*
-     * ---------------------------------------------------
-     * BODY STATE
-     * ---------------------------------------------------
+     * ===================================================
+     * BODY / PRODUCTION SOLVER
+     * ===================================================
      */
 
     initializeBodyState(
@@ -1482,9 +1522,9 @@ async function loadModel() {
     );
 
     /*
-     * ---------------------------------------------------
+     * ===================================================
      * OPTIONAL LAB GATES
-     * ---------------------------------------------------
+     * ===================================================
      */
 
     const params =
@@ -1504,6 +1544,7 @@ async function loadModel() {
       const result =
         runClosedChainViability({
           skeleton,
+
           statusElement:
             status,
         });
@@ -1528,6 +1569,7 @@ async function loadModel() {
       const result =
         runClosedChainMultiEffector({
           skeleton,
+
           statusElement:
             status,
         });
@@ -1541,43 +1583,43 @@ async function loadModel() {
     }
 
     /*
-     * ---------------------------------------------------
-     * NORMAL CHARACTER RUNTIME
-     * ---------------------------------------------------
-     *
-     * Skeleton
-     *    ↓
-     * BodyStateBinder
-     *    ↓
-     * ContactState
-     *    ↓
-     * ContactTaskGenerator
-     *    ↓
-     * TaskSet
-     *    ↓
-     * TaskResolver
-     *    ↓
-     * TaskConstraintBuilder
-     *    ↓
-     * ConstraintSet
-     *    ↓
-     * ConstraintSolver
-     *
-     * ПОКА НЕТ:
-     *
-     * Gait
-     * Pose Writer
-     * production IK
+     * ===================================================
+     * PRODUCTION RUNTIME READY
+     * ===================================================
      */
 
     setStatus(
-      `CONSTRAINT SOLVER GREEN — runtime initialized | ` +
-      `ground ${modelBox.min.y.toFixed(3)} | ` +
-      `tasks ${taskSet.enabledCount()} | ` +
-      `hard ${resolvedTaskPlan?.hard.length ?? 0} | ` +
-      `constraints ${constraintSet.enabledCount()} | ` +
-      `solver ${solverResult?.status ?? "none"} | ` +
-      `conflicts ${resolvedTaskPlan?.conflicts.length ?? 0}`
+      `DLS PRODUCTION READY — ` +
+      `skeleton ${skeleton.bones.length} bones | ` +
+      `damping ${constraintSolver.damping} | ` +
+      `chain ${constraintSolver.maxChainBones} | ` +
+      `poseWriter ON | ` +
+      `ground ${modelBox.min.y.toFixed(3)}`
+    );
+
+    console.log(
+      "[AstraWay] DLS PRODUCTION READY",
+      {
+        skeletonBones:
+          skeleton.bones.length,
+
+        solver:
+          constraintSolver.snapshot(),
+
+        writer:
+          poseWriter.snapshot(),
+
+        pipeline:
+          [
+            "BodyStateBinder",
+            "ContactTaskGenerator",
+            "TaskResolver",
+            "TaskConstraintBuilder",
+            "ConstraintSolver",
+            "PoseWriter",
+            "Skeleton",
+          ],
+      }
     );
 
   } catch (error) {
@@ -1592,9 +1634,9 @@ async function loadModel() {
 }
 
 /*
- * -------------------------------------------------------
- * RENDER / GAME LOOP
- * -------------------------------------------------------
+ * =======================================================
+ * RENDER LOOP
+ * =======================================================
  */
 
 let lastTime =
@@ -1612,12 +1654,9 @@ function animate() {
     (now - lastTime) /
     1000;
 
-  lastTime = now;
+  lastTime =
+    now;
 
-  /*
-   * Защита от огромного dt
-   * после сворачивания вкладки.
-   */
   dt =
     Math.min(
       dt,
@@ -1625,30 +1664,28 @@ function animate() {
     );
 
   /*
-   * Старый IK Gate запускается
-   * только если solver был
-   * подготовлен.
+   * Gate 7 остаётся отдельным
+   * лабораторным тестом.
+   *
+   * В production pipeline
+   * CCD IK не вызывается.
    */
   updateIKGate();
 
   /*
-   * Главный runtime:
+   * Production:
    *
+   * measure
+   *   ↓
+   * tasks
+   *   ↓
+   * constraints
+   *   ↓
+   * DLS
+   *   ↓
+   * PoseWriter
+   *   ↓
    * Skeleton
-   *    ↓
-   * Binder
-   *    ↓
-   * BodyState
-   *    ↓
-   * ContactState
-   *    ↓
-   * TaskSet
-   *    ↓
-   * TaskResolver
-   *    ↓
-   * ConstraintSet
-   *    ↓
-   * ConstraintSolver
    */
   updateBodyState(
     dt
@@ -1661,9 +1698,9 @@ function animate() {
 }
 
 /*
- * -------------------------------------------------------
+ * =======================================================
  * RESIZE
- * -------------------------------------------------------
+ * =======================================================
  */
 
 window.addEventListener(
@@ -1689,5 +1726,12 @@ window.addEventListener(
   }
 );
 
+/*
+ * =======================================================
+ * START
+ * =======================================================
+ */
+
 loadModel();
+
 animate();
