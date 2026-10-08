@@ -70,6 +70,34 @@ export class BodyStateBinder {
     this.contactVelocityThreshold =
       contactVelocityThreshold;
 
+    /*
+     * DIAGNOSTICS ONLY.
+     *
+     * Это наблюдаемая телеметрия контакта.
+     * Она НЕ участвует в принятии решения.
+     */
+    this.diagnostics = {
+      left: {
+        footY: NaN,
+        groundY: this.groundY,
+        dy: Infinity,
+        verticalVelocity: 0,
+        nearGround: false,
+        stableEnough: false,
+        phase: "none",
+      },
+
+      right: {
+        footY: NaN,
+        groundY: this.groundY,
+        dy: Infinity,
+        verticalVelocity: 0,
+        nearGround: false,
+        stableEnough: false,
+        phase: "none",
+      },
+    };
+
     this._previousPosition =
       new THREE.Vector3();
 
@@ -443,6 +471,18 @@ export class BodyStateBinder {
       return;
     }
 
+    const side =
+      contactId === "contact_foot_L"
+        ? "left"
+        : contactId === "contact_foot_R"
+          ? "right"
+          : null;
+
+    const diagnostics =
+      side
+        ? this.diagnostics[side]
+        : null;
+
     const bone =
       this._findBone(
         logicalBone
@@ -450,6 +490,19 @@ export class BodyStateBinder {
 
     if (!bone) {
       contact.release();
+
+      if (diagnostics) {
+        diagnostics.footY = NaN;
+        diagnostics.groundY =
+          this.groundY;
+        diagnostics.dy = Infinity;
+        diagnostics.verticalVelocity = 0;
+        diagnostics.nearGround = false;
+        diagnostics.stableEnough = false;
+        diagnostics.phase =
+          contact.phase;
+      }
+
       return;
     }
 
@@ -478,6 +531,32 @@ export class BodyStateBinder {
       verticalVelocity <=
       this.contactVelocityThreshold;
 
+    /*
+     * DIAGNOSTICS:
+     * читаем факты ДО lifecycle decision.
+     *
+     * Никакого влияния на механику.
+     */
+    if (diagnostics) {
+      diagnostics.footY =
+        position.y;
+
+      diagnostics.groundY =
+        this.groundY;
+
+      diagnostics.dy =
+        distance;
+
+      diagnostics.verticalVelocity =
+        verticalVelocity;
+
+      diagnostics.nearGround =
+        nearGround;
+
+      diagnostics.stableEnough =
+        stableEnough;
+    }
+
     if (
       nearGround &&
       stableEnough
@@ -502,6 +581,11 @@ export class BodyStateBinder {
 
       contact.isSupport = true;
 
+      if (diagnostics) {
+        diagnostics.phase =
+          contact.phase;
+      }
+
       return;
     }
 
@@ -509,10 +593,21 @@ export class BodyStateBinder {
       contact.isPlanted()
     ) {
       contact.break();
+
+      if (diagnostics) {
+        diagnostics.phase =
+          contact.phase;
+      }
+
       return;
     }
 
     contact.release();
+
+    if (diagnostics) {
+      diagnostics.phase =
+        contact.phase;
+    }
   }
 
   _measureContacts() {
@@ -602,5 +697,9 @@ export class BodyStateBinder {
 
   getContacts() {
     return this.bodyState.contacts;
+  }
+
+  getDiagnostics() {
+    return this.diagnostics;
   }
 }
