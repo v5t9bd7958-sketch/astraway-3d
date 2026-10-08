@@ -15,9 +15,10 @@ import { BodyState } from "./character/BodyState.js";
 import { BodyStateBinder } from "./character/BodyStateBinder.js";
 
 import { TaskSet } from "./character/TaskSet.js";
-import {
-  ContactTaskGenerator,
-} from "./character/ContactTaskGenerator.js";
+import { ContactTaskGenerator } from "./character/ContactTaskGenerator.js";
+import { TaskResolver } from "./character/TaskResolver.js";
+import { ConstraintSet } from "./character/ConstraintSet.js";
+import { TaskConstraintBuilder } from "./character/TaskConstraintBuilder.js";
 
 import {
   runClosedChainViability,
@@ -165,6 +166,10 @@ let bodyStateBinder = null;
 
 let taskSet = null;
 let contactTaskGenerator = null;
+let taskResolver = null;
+let constraintSet = null;
+let taskConstraintBuilder = null;
+let resolvedTaskPlan = null;
 
 let bodyStateFrames = 0;
 let bodyStateLastReport = 0;
@@ -967,6 +972,19 @@ function initializeBodyState(
   taskSet =
     new TaskSet();
 
+  taskResolver =
+    new TaskResolver();
+
+  constraintSet =
+    new ConstraintSet();
+
+  taskConstraintBuilder =
+    new TaskConstraintBuilder({
+      constraintSet,
+    });
+
+  resolvedTaskPlan = null;
+
   contactTaskGenerator =
     new ContactTaskGenerator({
       taskSet,
@@ -999,7 +1017,10 @@ function updateBodyState(
     !bodyStateBinder ||
     !bodyState ||
     !contactTaskGenerator ||
-    !taskSet
+    !taskSet ||
+    !taskResolver ||
+    !constraintSet ||
+    !taskConstraintBuilder
   ) {
     return;
   }
@@ -1019,6 +1040,15 @@ function updateBodyState(
    */
   contactTaskGenerator.update(
     bodyState
+  );
+
+  resolvedTaskPlan =
+    taskResolver.resolve(
+      taskSet
+    );
+
+  taskConstraintBuilder.update(
+    resolvedTaskPlan
   );
 
   bodyStateFrames++;
@@ -1079,7 +1109,10 @@ function updateBodyState(
     `R ${rightPhase} | ` +
     `support ${support} | ` +
     `balance ${balanceText} | ` +
-    `tasks ${taskSet.enabledCount()}`
+    `tasks ${taskSet.enabledCount()} | ` +
+    `hard ${resolvedTaskPlan?.hard.length ?? 0} | ` +
+    `constraints ${constraintSet.enabledCount()} | ` +
+    `conflicts ${resolvedTaskPlan?.conflicts.length ?? 0}`
   );
 
   if (
@@ -1132,6 +1165,12 @@ function updateBodyState(
 
         tasks:
           taskSet.snapshot(),
+
+        taskPlan:
+          taskResolver.snapshot(),
+
+        constraints:
+          constraintSet.snapshot(),
       }
     );
   }
@@ -1401,6 +1440,12 @@ async function loadModel() {
      * ContactTaskGenerator
      *   ↓
      * TaskSet
+     *   ↓
+     * TaskResolver
+     *   ↓
+     * TaskConstraintBuilder
+     *   ↓
+     * ConstraintSet
      *
      * НЕТ:
      *
@@ -1413,7 +1458,10 @@ async function loadModel() {
     setStatus(
       `BODY STATE GREEN — runtime initialized | ` +
       `ground ${modelBox.min.y.toFixed(3)} | ` +
-      `tasks ${taskSet.enabledCount()}`
+      `tasks ${taskSet.enabledCount()} | ` +
+      `hard ${resolvedTaskPlan?.hard.length ?? 0} | ` +
+      `constraints ${constraintSet.enabledCount()} | ` +
+      `conflicts ${resolvedTaskPlan?.conflicts.length ?? 0}`
     );
 
   } catch (error) {
@@ -1479,6 +1527,10 @@ function animate() {
    * ContactState
    *    ↓
    * TaskSet
+   *    ↓
+   * TaskResolver
+   *    ↓
+   * ConstraintSet
    */
   updateBodyState(
     dt
