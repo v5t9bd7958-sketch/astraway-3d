@@ -14,6 +14,11 @@ import { BONE_MAP } from "./character/BoneMap.js";
 import { BodyState } from "./character/BodyState.js";
 import { BodyStateBinder } from "./character/BodyStateBinder.js";
 
+import { TaskSet } from "./character/TaskSet.js";
+import {
+  ContactTaskGenerator,
+} from "./character/ContactTaskGenerator.js";
+
 import {
   runClosedChainViability,
 } from "./solver-bakeoff/ClosedChainViability.js";
@@ -151,12 +156,15 @@ let skeleton = null;
 
 /*
  * -------------------------------------------------------
- * BODY STATE RUNTIME
+ * BODY STATE + TASK RUNTIME
  * -------------------------------------------------------
  */
 
 let bodyState = null;
 let bodyStateBinder = null;
+
+let taskSet = null;
+let contactTaskGenerator = null;
 
 let bodyStateFrames = 0;
 let bodyStateLastReport = 0;
@@ -929,7 +937,7 @@ function updateIKGate() {
 
 /*
  * -------------------------------------------------------
- * BODY STATE
+ * BODY STATE + CONTACT TASKS
  * -------------------------------------------------------
  */
 
@@ -956,6 +964,14 @@ function initializeBodyState(
         0.35,
     });
 
+  taskSet =
+    new TaskSet();
+
+  contactTaskGenerator =
+    new ContactTaskGenerator({
+      taskSet,
+    });
+
   bodyStateFrames = 0;
   bodyStateLastReport = 0;
 
@@ -964,10 +980,14 @@ function initializeBodyState(
     {
       groundY:
         box.min.y,
+
       contacts:
         [
           ...bodyState.contacts.keys(),
         ],
+
+      tasks:
+        taskSet.count(),
     }
   );
 }
@@ -977,7 +997,9 @@ function updateBodyState(
 ) {
   if (
     !bodyStateBinder ||
-    !bodyState
+    !bodyState ||
+    !contactTaskGenerator ||
+    !taskSet
   ) {
     return;
   }
@@ -986,12 +1008,23 @@ function updateBodyState(
     dt
   );
 
+  /*
+   * ContactState уже обновлён.
+   *
+   * Теперь контакт может
+   * породить Task.
+   *
+   * TaskGenerator ничего
+   * не меняет в Skeleton.
+   */
+  contactTaskGenerator.update(
+    bodyState
+  );
+
   bodyStateFrames++;
 
   /*
    * Не спамим DOM каждый кадр.
-   * Диагностика обновляется
-   * примерно 10 раз в секунду.
    */
   const now =
     performance.now();
@@ -1045,7 +1078,8 @@ function updateBodyState(
     `L ${leftPhase} | ` +
     `R ${rightPhase} | ` +
     `support ${support} | ` +
-    `balance ${balanceText}`
+    `balance ${balanceText} | ` +
+    `tasks ${taskSet.enabledCount()}`
   );
 
   if (
@@ -1059,31 +1093,45 @@ function updateBodyState(
       {
         frame:
           bodyStateFrames,
+
         position:
           bodyState.position.toArray(),
+
         velocity:
           bodyState.velocity.toArray(),
+
         com:
           bodyState.com.toArray(),
+
         comVelocity:
           bodyState.comVelocity.toArray(),
+
         supportCount:
           bodyState.supportCount,
+
         supportPolygon:
           bodyState.supportPolygon.map(
             (p) =>
               p.toArray()
           ),
+
         balanceError:
           bodyState.balanceError,
+
         grounded:
           bodyState.grounded,
+
         stable:
           bodyState.stable,
+
         leftFoot:
           leftPhase,
+
         rightFoot:
           rightPhase,
+
+        tasks:
+          taskSet.snapshot(),
       }
     );
   }
@@ -1269,12 +1317,11 @@ async function loadModel() {
     );
 
     /*
-     * BodyState подключается
-     * ПОСЛЕ всех pose-проверок.
-     *
-     * Никакой IK здесь ещё
-     * не меняет скелет.
+     * ---------------------------------------------------
+     * BODY STATE
+     * ---------------------------------------------------
      */
+
     initializeBodyState(
       model
     );
@@ -1282,11 +1329,7 @@ async function loadModel() {
     /*
      * ---------------------------------------------------
      * OPTIONAL LAB GATES
-     * -------------------------------------------------
-     *
-     * Старые solver gates сохраняем.
-     * Они запускаются только
-     * через query parameter.
+     * ---------------------------------------------------
      */
 
     const params =
@@ -1345,20 +1388,32 @@ async function loadModel() {
     /*
      * ---------------------------------------------------
      * NORMAL CHARACTER RUNTIME
-     * -------------------------------------------------
+     * ---------------------------------------------------
      *
-     * Здесь специально НЕТ:
+     * Сейчас:
+     *
+     * Skeleton
+     *   ↓
+     * BodyStateBinder
+     *   ↓
+     * ContactState
+     *   ↓
+     * ContactTaskGenerator
+     *   ↓
+     * TaskSet
+     *
+     * НЕТ:
      *
      * Gait
-     * Tasks
      * IK
      * Solver
-     *
-     * Мы сначала измеряем тело.
+     * Pose Writer
      */
 
     setStatus(
-      `BODY STATE GREEN — runtime initialized | ground ${modelBox.min.y.toFixed(3)}`
+      `BODY STATE GREEN — runtime initialized | ` +
+      `ground ${modelBox.min.y.toFixed(3)} | ` +
+      `tasks ${taskSet.enabledCount()}`
     );
 
   } catch (error) {
@@ -1413,7 +1468,7 @@ function animate() {
   updateIKGate();
 
   /*
-   * Главный новый runtime:
+   * Главный runtime:
    *
    * Skeleton
    *    ↓
@@ -1421,9 +1476,9 @@ function animate() {
    *    ↓
    * BodyState
    *    ↓
-   * Contacts
+   * ContactState
    *    ↓
-   * Support / Balance
+   * TaskSet
    */
   updateBodyState(
     dt
