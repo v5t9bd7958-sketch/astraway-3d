@@ -12,6 +12,8 @@ import {
 
 import { BONE_MAP } from "./character/BoneMap.js";
 
+import { runClosedChainViability } from "./solver-bakeoff/ClosedChainViability.js";
+
 const canvas = document.querySelector("#viewer");
 const status = document.querySelector("#status");
 
@@ -99,34 +101,8 @@ const MODEL_URL =
 
 let model = null;
 
-/*
- * ---------------------------------------------------------
- * AUTHORITATIVE SKINNED MESH / SKELETON
- * ---------------------------------------------------------
- *
- * GLTF root (model) does NOT own the Skeleton.
- *
- * The Skeleton belongs to the actual SkinnedMesh.
- *
- * Ownership:
- *
- * GLTF Group
- *   └── SkinnedMesh
- *        └── Skeleton
- *             └── bones[]
- *
- * We keep this reference explicitly so that every
- * animation / IK operation uses the real Skeleton owner.
- */
-
 let skinnedMesh = null;
 let skeleton = null;
-
-/*
- * ---------------------------------------------------------
- * IK GATE STATE
- * ---------------------------------------------------------
- */
 
 let ikSolver = null;
 let ikTarget = null;
@@ -230,12 +206,6 @@ function frameModel(root) {
   ground.position.y =
     box.min.y;
 }
-
-/*
- * ---------------------------------------------------------
- * POSE GATE
- * ---------------------------------------------------------
- */
 
 function runPoseGate(root) {
   const results = [];
@@ -419,12 +389,6 @@ function runPoseGate(root) {
       passCount === results.length,
   };
 }
-
-/*
- * ---------------------------------------------------------
- * CONTROLLED POSE TEST
- * ---------------------------------------------------------
- */
 
 function runControlledPoseTest(root) {
   const results = [];
@@ -680,31 +644,6 @@ function runControlledPoseTest(root) {
   };
 }
 
-/*
- * ---------------------------------------------------------
- * IK GATE 7
- *
- * upf-gti/IK-threejs
- *
- * IMPORTANT:
- *
- * chain order:
- *
- * [ effector, parent, root ]
- *
- * therefore:
- *
- * [ foot, shin, thigh ]
- *
- * Target is Object3D.
- *
- * Skeleton is NOT modified.
- * No target Bone.
- * No bones.push().
- * No constraints.
- * ---------------------------------------------------------
- */
-
 function prepareIKGate(modelRoot, skin) {
   const find = (logicalName) => {
     const canonicalName =
@@ -730,14 +669,6 @@ function prepareIKGate(modelRoot, skin) {
       "IK Skeleton missing on SkinnedMesh"
     );
   }
-
-  /*
-   * AUTHORITATIVE SKELETON OWNER:
-   *
-   * SkinnedMesh owns Skeleton.
-   *
-   * Never read modelRoot.skeleton.
-   */
 
   const activeSkeleton =
     skin.skeleton;
@@ -809,21 +740,11 @@ function prepareIKGate(modelRoot, skin) {
   ikBeforeBoneCount =
     bones.length;
 
-  /*
-   * Target is a normal Object3D.
-   * It is deliberately NOT a Bone.
-   */
-
   ikTarget =
     new THREE.Object3D();
 
   ikTarget.name =
     "AstraWay_IK_Target_LeftFoot";
-
-  /*
-   * Update FK/world matrices BEFORE reading
-   * the original foot position.
-   */
 
   modelRoot.updateMatrixWorld(true);
 
@@ -833,13 +754,6 @@ function prepareIKGate(modelRoot, skin) {
   foot.getWorldPosition(
     footWorld
   );
-
-  /*
-   * Small reachable displacement.
-   *
-   * Gate 7 tests solver operation rather than
-   * extreme reachability.
-   */
 
   ikTarget.position.copy(
     footWorld
@@ -875,11 +789,6 @@ function prepareIKGate(modelRoot, skin) {
 
   scene.add(ikMarker);
 
-  /*
-   * Initial error MUST be measured after
-   * updateMatrixWorld(true).
-   */
-
   modelRoot.updateMatrixWorld(true);
 
   const initialFoot =
@@ -897,25 +806,10 @@ function prepareIKGate(modelRoot, skin) {
       ikTargetPosition
     );
 
-  /*
-   * Create solver against the ORIGINAL
-   * SkinnedMesh-owned Skeleton.
-   *
-   * No skeleton.bones modification.
-   */
-
   ikSolver =
     new CCDIKSolver(
       activeSkeleton
     );
-
-  /*
-   * Gate 7 intentionally uses:
-   *
-   * constraints = [null, null, null]
-   *
-   * No anatomical restrictions yet.
-   */
 
   ikSolver.createChain(
     [
@@ -965,12 +859,6 @@ function prepareIKGate(modelRoot, skin) {
   );
 }
 
-/*
- * ---------------------------------------------------------
- * IK GATE 7 FRAME STEP
- * ---------------------------------------------------------
- */
-
 function updateIKGate() {
   if (
     !ikSolver ||
@@ -980,18 +868,7 @@ function updateIKGate() {
     return;
   }
 
-  /*
-   * No model rotation during Gate 7.
-   *
-   * This keeps the diagnostic deterministic.
-   */
-
   ikSolver.update();
-
-  /*
-   * Solver modifies bone local transforms.
-   * Force FK/world matrices before measuring.
-   */
 
   model.updateMatrixWorld(true);
 
@@ -1009,12 +886,6 @@ function updateIKGate() {
 
   finishIKGate();
 }
-
-/*
- * ---------------------------------------------------------
- * IK GATE 7 FINAL DIAGNOSTIC
- * ---------------------------------------------------------
- */
 
 function finishIKGate() {
   if (ikGateFinished) {
@@ -1035,24 +906,12 @@ function finishIKGate() {
     return;
   }
 
-  /*
-   * The Skeleton belongs to SkinnedMesh.
-   *
-   * Do NOT use:
-   *
-   * model.skeleton
-   */
-
   if (!skinnedMesh || !skinnedMesh.skeleton) {
     status.textContent =
       "IK GATE RED — SkinnedMesh/Skeleton disappeared";
 
     return;
   }
-
-  /*
-   * Final FK/world update before measurement.
-   */
 
   model.updateMatrixWorld(true);
 
@@ -1089,13 +948,6 @@ function finishIKGate() {
 
   const improvementPass =
     improvement > 0.0001;
-
-  /*
-   * Gate 7 checks that the solver actually
-   * modifies the chain in the correct direction.
-   *
-   * It does NOT yet require perfect IK accuracy.
-   */
 
   const pass =
     movedPass &&
@@ -1191,12 +1043,6 @@ function finishIKGate() {
   );
 }
 
-/*
- * ---------------------------------------------------------
- * LOAD MODEL
- * ---------------------------------------------------------
- */
-
 async function loadModel() {
   try {
     setStatus(
@@ -1278,12 +1124,6 @@ async function loadModel() {
 
     model =
       gltf.scene;
-
-    /*
-     * Find the REAL SkinnedMesh once.
-     *
-     * This is the owner of Skeleton.
-     */
 
     skinnedMesh = null;
 
@@ -1409,13 +1249,45 @@ async function loadModel() {
     );
 
     /*
+     * -------------------------------------------------------
+     * GATE 8A
+     *
+     * Closed-Chain IK viability test.
+     *
      * IMPORTANT:
      *
-     * No model rotation starts here.
+     * This is deliberately isolated from Gate 7.
      *
-     * animate() deliberately does NOT modify
-     * model.rotation.y.
+     * It builds its own temporary Link/Joint/Goal chain.
+     * It does NOT modify the live THREE.Skeleton.
+     *
+     * Run only with:
+     *
+     * ?gate8a=1
+     * -------------------------------------------------------
      */
+
+    const runGate8A =
+      new URLSearchParams(
+        window.location.search
+      ).get("gate8a") === "1";
+
+    if (runGate8A) {
+      setStatus(
+        "10/10 — Running Closed-Chain IK Gate 8A…"
+      );
+
+      const gate8A =
+        runClosedChainViability({
+          skeleton,
+          statusElement: status,
+        });
+
+      console.log(
+        "[AstraWay] CLOSED-CHAIN IK GATE 8A",
+        gate8A
+      );
+    }
 
     setStatus(
       "9/10 — IK Gate 7 running…"
@@ -1431,24 +1303,10 @@ async function loadModel() {
   }
 }
 
-/*
- * ---------------------------------------------------------
- * RENDER
- * ---------------------------------------------------------
- */
-
 function animate() {
   requestAnimationFrame(
     animate
   );
-
-  /*
-   * NO MODEL ROTATION.
-   *
-   * Gate 7 requires a static model so that
-   * world-space target and foot measurements
-   * are not contaminated by external rotation.
-   */
 
   updateIKGate();
 
