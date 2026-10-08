@@ -26,6 +26,9 @@ import { TaskConstraintBuilder } from "./character/TaskConstraintBuilder.js";
 import { ConstraintSolver } from "./character/ConstraintSolver.js";
 import { PoseWriter } from "./character/PoseWriter.js";
 
+import { SurfaceQuery } from "./character/SurfaceQuery.js";
+import { ContactPerception } from "./character/ContactPerception.js";
+
 import {
   runClosedChainViability,
 } from "./solver-bakeoff/ClosedChainViability.js";
@@ -33,6 +36,44 @@ import {
 import {
   runClosedChainMultiEffector,
 } from "./solver-bakeoff/ClosedChainMultiEffector.js";
+
+/*
+ * =======================================================
+ * ASTRAWAY — CHARACTER LAB RUNTIME
+ *
+ * This file is the application orchestrator.
+ *
+ * Production authority:
+ *
+ * WORLD
+ *   ↓
+ * SURFACE QUERY
+ *   ↓
+ * CONTACT PERCEPTION
+ *   ↓
+ * CONTACT EVIDENCE
+ *   ↓
+ * BODY STATE
+ *   ↓
+ * TASKS
+ *   ↓
+ * CONSTRAINTS
+ *   ↓
+ * SOLVER
+ *   ↓
+ * POSE WRITER
+ *   ↓
+ * SKELETON
+ *
+ * Absolute production invariant:
+ *
+ * Only PoseWriter is allowed to write final
+ * production bone transforms.
+ *
+ * This file must never directly modify
+ * production bone local transforms.
+ * =======================================================
+ */
 
 /*
  * =======================================================
@@ -66,7 +107,7 @@ const renderer =
 
 renderer.setPixelRatio(
   Math.min(
-    window.devicePixelRatio,
+    window.devicePixelRatio || 1,
     2
   )
 );
@@ -91,7 +132,10 @@ const camera =
   new THREE.PerspectiveCamera(
     35,
     window.innerWidth /
-      window.innerHeight,
+      Math.max(
+        window.innerHeight,
+        1
+      ),
     0.01,
     100
   );
@@ -101,6 +145,12 @@ camera.position.set(
   1.2,
   4
 );
+
+/*
+ * =======================================================
+ * LIGHTING
+ * =======================================================
+ */
 
 scene.add(
   new THREE.HemisphereLight(
@@ -122,7 +172,9 @@ keyLight.position.set(
   3
 );
 
-scene.add(keyLight);
+scene.add(
+  keyLight
+);
 
 const fillLight =
   new THREE.DirectionalLight(
@@ -136,7 +188,22 @@ fillLight.position.set(
   -2
 );
 
-scene.add(fillLight);
+scene.add(
+  fillLight
+);
+
+/*
+ * =======================================================
+ * DEBUG GROUND VISUALIZATION
+ *
+ * This mesh is visual only.
+ *
+ * It is NOT the contact authority.
+ *
+ * Contact authority:
+ * SurfaceQuery → ContactPerception → Evidence
+ * =======================================================
+ */
 
 const ground =
   new THREE.Mesh(
@@ -153,11 +220,13 @@ const ground =
 ground.rotation.x =
   -Math.PI / 2;
 
-scene.add(ground);
+scene.add(
+  ground
+);
 
 /*
  * =======================================================
- * MODEL
+ * LOADER
  * =======================================================
  */
 
@@ -171,6 +240,12 @@ loader.setMeshoptDecoder(
 const MODEL_URL =
   `${import.meta.env.BASE_URL}models/Xbot.glb`;
 
+/*
+ * =======================================================
+ * RUNTIME STATE
+ * =======================================================
+ */
+
 let model = null;
 
 let skinnedMesh = null;
@@ -179,13 +254,17 @@ let skeleton = null;
 
 /*
  * =======================================================
- * BODY / TASK / CONSTRAINT PIPELINE
+ * PRODUCTION CHARACTER PIPELINE
  * =======================================================
  */
 
 let bodyState = null;
 
 let bodyStateBinder = null;
+
+let surfaceQuery = null;
+
+let contactPerception = null;
 
 let taskSet = null;
 
@@ -207,13 +286,54 @@ let solverResult = null;
 
 let poseWriteResult = null;
 
-let bodyStateFrames = 0;
+/*
+ * =======================================================
+ * RUNTIME LIFECYCLE
+ * =======================================================
+ */
 
-let bodyStateLastReport = 0;
+const RUNTIME_PHASE = Object.freeze({
+  BOOT: "BOOT",
+  LOADING: "LOADING",
+  VALIDATING: "VALIDATING",
+  INITIALIZING: "INITIALIZING",
+  READY: "READY",
+  FAILED: "FAILED",
+});
+
+let runtimePhase =
+  RUNTIME_PHASE.BOOT;
+
+let runtimeStartedAt =
+  performance.now();
+
+let modelLoadedAt =
+  0;
 
 /*
  * =======================================================
- * GATE 7
+ * FRAME / DIAGNOSTIC STATE
+ * =======================================================
+ */
+
+let bodyStateFrames =
+  0;
+
+let bodyStateLastReport =
+  0;
+
+let lastFrameTime =
+  performance.now();
+
+let frameCount =
+  0;
+
+let droppedFrameCount =
+  0;
+
+/*
+ * =======================================================
+ * GATE 7 — CCD IK
  * =======================================================
  */
 
@@ -233,7 +353,8 @@ let ikInitialFoot = null;
 
 let ikTargetPosition = null;
 
-const IK_TEST_FRAMES = 60;
+const IK_TEST_FRAMES =
+  60;
 
 /*
  * =======================================================
@@ -250,9 +371,47 @@ function setStatus(message) {
   );
 }
 
+function setRuntimePhase(
+  phase
+) {
+  runtimePhase =
+    phase;
+
+  console.log(
+    `[AstraWay] Runtime phase → ${phase}`
+  );
+}
+
 /*
  * =======================================================
- * UTILS
+ * ERROR HANDLING
+ * =======================================================
+ */
+
+function failRuntime(
+  error,
+  context = "Runtime"
+) {
+  runtimePhase =
+    RUNTIME_PHASE.FAILED;
+
+  const message =
+    error instanceof Error
+      ? error.message
+      : String(error);
+
+  console.error(
+    `[AstraWay] ${context}`,
+    error
+  );
+
+  status.textContent =
+    `❌ ${context}: ${message}`;
+}
+
+/*
+ * =======================================================
+ * ASYNC TIMEOUT
  * =======================================================
  */
 
@@ -261,24 +420,42 @@ function timeout(
   ms,
   name
 ) {
-  return Promise.race([
-    promise,
+  let timer = null;
 
+  const timeoutPromise =
     new Promise(
       (_, reject) => {
-        setTimeout(
-          () =>
-            reject(
-              new Error(
-                `${name}: timeout ${ms / 1000}s`
-              )
-            ),
-          ms
-        );
+        timer =
+          setTimeout(
+            () => {
+              reject(
+                new Error(
+                  `${name}: timeout ${ms / 1000}s`
+                )
+              );
+            },
+            ms
+          );
       }
-    ),
-  ]);
+    );
+
+  return Promise.race([
+    promise,
+    timeoutPromise,
+  ]).finally(() => {
+    if (timer !== null) {
+      clearTimeout(
+        timer
+      );
+    }
+  });
 }
+
+/*
+ * =======================================================
+ * ARRAY BUFFER NORMALIZATION
+ * =======================================================
+ */
 
 function toArrayBuffer(
   value
@@ -300,41 +477,144 @@ function toArrayBuffer(
     );
   }
 
-  return value?.buffer
-    ? toArrayBuffer(
-        value.buffer
-      )
-    : null;
+  if (
+    value?.buffer
+  ) {
+    return toArrayBuffer(
+      value.buffer
+    );
+  }
+
+  return null;
 }
+
+/*
+ * =======================================================
+ * BONE RESOLUTION
+ *
+ * Logical character name
+ *        ↓
+ * BoneMap
+ *        ↓
+ * Canonical Three.js bone
+ * =======================================================
+ */
 
 function findBone(
   root,
   logicalName
 ) {
+  if (!root) {
+    return null;
+  }
+
   const canonicalName =
     BONE_MAP[
       logicalName
     ];
 
-  return canonicalName
-    ? root.getObjectByName(
-        canonicalName
-      )
-    : null;
+  if (!canonicalName) {
+    return null;
+  }
+
+  return root.getObjectByName(
+    canonicalName
+  );
 }
 
 /*
  * =======================================================
- * CAMERA
+ * MODEL / SKELETON ASSERTIONS
+ * =======================================================
+ */
+
+function assertModelRoot(
+  root
+) {
+  if (!root) {
+    throw new Error(
+      "Model root missing"
+    );
+  }
+
+  if (!root.isObject3D) {
+    throw new Error(
+      "Model root is not THREE.Object3D"
+    );
+  }
+}
+
+function assertSkinnedMesh(
+  skin
+) {
+  if (!skin) {
+    throw new Error(
+      "SkinnedMesh missing"
+    );
+  }
+
+  if (!skin.isSkinnedMesh) {
+    throw new Error(
+      "Selected mesh is not SkinnedMesh"
+    );
+  }
+
+  if (!skin.skeleton) {
+    throw new Error(
+      "SkinnedMesh skeleton missing"
+    );
+  }
+}
+
+function assertSkeleton(
+  skin
+) {
+  if (!skin?.skeleton) {
+    throw new Error(
+      "Skeleton missing"
+    );
+  }
+
+  if (
+    !Array.isArray(
+      skin.skeleton.bones
+    ) ||
+    skin.skeleton.bones.length === 0
+  ) {
+    throw new Error(
+      "Skeleton contains no bones"
+    );
+  }
+}
+
+/*
+ * =======================================================
+ * CAMERA / MODEL FRAMING
  * =======================================================
  */
 
 function frameModel(
   root
 ) {
+  assertModelRoot(
+    root
+  );
+
+  root.updateMatrixWorld(
+    true
+  );
+
   const box =
     new THREE.Box3()
-      .setFromObject(root);
+      .setFromObject(
+        root
+      );
+
+  if (box.isEmpty()) {
+    throw new Error(
+      "Model bounding box is empty"
+    );
+  }
 
   const size =
     box.getSize(
@@ -353,16 +633,41 @@ function frameModel(
       size.z
     );
 
+  if (
+    !Number.isFinite(
+      maxSize
+    ) ||
+    maxSize <= 0
+  ) {
+    throw new Error(
+      "Invalid model dimensions"
+    );
+  }
+
+  const halfFov =
+    THREE.MathUtils.degToRad(
+      camera.fov * 0.5
+    );
+
+  const tangent =
+    Math.tan(
+      halfFov
+    );
+
+  if (
+    !Number.isFinite(
+      tangent
+    ) ||
+    tangent <= 0
+  ) {
+    throw new Error(
+      "Invalid camera FOV"
+    );
+  }
+
   const distance =
     maxSize /
-    (
-      2 *
-      Math.tan(
-        THREE.MathUtils.degToRad(
-          camera.fov * 0.5
-        )
-      )
-    );
+    (2 * tangent);
 
   camera.position.set(
     center.x,
@@ -376,6 +681,12 @@ function frameModel(
     center
   );
 
+  /*
+   * Visual ground only.
+   *
+   * The actual SurfaceQuery backend receives
+   * the same initial Y separately.
+   */
   ground.position.y =
     box.min.y;
 
@@ -385,6 +696,10 @@ function frameModel(
 /*
  * =======================================================
  * POSE GATE
+ *
+ * Structural validation only.
+ *
+ * No production pose is written here.
  * =======================================================
  */
 
@@ -410,6 +725,15 @@ function runPoseGate(
   checks.push(
     missing.length === 0
   );
+
+  if (
+    missing.length > 0
+  ) {
+    console.error(
+      "[AstraWay] Missing canonical bones",
+      missing
+    );
+  }
 
   const thigh =
     findBone(
@@ -565,19 +889,22 @@ function runPoseGate(
 
   return {
     passed,
-
     total:
       checks.length,
-
     pass:
       passed ===
       checks.length,
+    missing,
   };
 }
 
 /*
  * =======================================================
- * CONTROLLED POSE
+ * CONTROLLED POSE TEST
+ *
+ * Tests FK propagation only.
+ *
+ * Original transforms are restored immediately.
  * =======================================================
  */
 
@@ -703,10 +1030,8 @@ function runControlledPoseTest(
 
   return {
     passed,
-
     total:
       tests.length,
-
     pass:
       passed ===
       tests.length,
@@ -715,7 +1040,12 @@ function runControlledPoseTest(
 
 /*
  * =======================================================
- * GATE 7 — CCD IK
+ * GATE 7 — PREPARE
+ *
+ * This is a test harness.
+ *
+ * It does not participate in the production
+ * BodyState → Task → Constraint → DLS pipeline.
  * =======================================================
  */
 
@@ -741,9 +1071,7 @@ function prepareIKGate(
       "foot_L"
     );
 
-  if (
-    !skin?.skeleton
-  ) {
+  if (!skin?.skeleton) {
     throw new Error(
       "IK Skeleton missing"
     );
@@ -780,6 +1108,16 @@ function prepareIKGate(
     skeleton.bones.indexOf(
       foot
     );
+
+  if (
+    thighIndex < 0 ||
+    shinIndex < 0 ||
+    footIndex < 0
+  ) {
+    throw new Error(
+      "IK bone indices invalid"
+    );
+  }
 
   root.updateMatrixWorld(
     true
@@ -876,7 +1214,8 @@ function prepareIKGate(
   );
 
   ikSolver.setConfiguration({
-    iterations: 1,
+    iterations:
+      1,
 
     thresholdTargetSq:
       0.00000001,
@@ -884,7 +1223,19 @@ function prepareIKGate(
     thresholdIterSqDist:
       0.00000001,
   });
+
+  ikFrames =
+    0;
+
+  ikFinished =
+    false;
 }
+
+/*
+ * =======================================================
+ * GATE 7 — UPDATE
+ * =======================================================
+ */
 
 function updateIKGate() {
   if (
@@ -910,7 +1261,8 @@ function updateIKGate() {
     return;
   }
 
-  ikFinished = true;
+  ikFinished =
+    true;
 
   const foot =
     findBone(
@@ -957,17 +1309,66 @@ function updateIKGate() {
     "[AstraWay] IK GATE 7",
     {
       pass,
-
       initialError:
         ikInitialError,
-
       finalError,
-
       improvement,
-
       moved,
     }
   );
+
+  if (pass) {
+    console.log(
+      "[AstraWay] IK GATE 7 GREEN"
+    );
+  } else {
+    console.error(
+      "[AstraWay] IK GATE 7 RED"
+    );
+  }
+}
+
+/*
+ * =======================================================
+ * PRODUCTION PIPELINE ASSERTION
+ * =======================================================
+ */
+
+function assertProductionPipeline() {
+  const required = {
+    bodyState,
+    bodyStateBinder,
+    surfaceQuery,
+    contactPerception,
+    taskSet,
+    contactTaskGenerator,
+    taskResolver,
+    constraintSet,
+    taskConstraintBuilder,
+    constraintSolver,
+    poseWriter,
+  };
+
+  const missing =
+    Object.entries(
+      required
+    )
+      .filter(
+        ([, value]) =>
+          !value
+      )
+      .map(
+        ([name]) =>
+          name
+      );
+
+  if (
+    missing.length > 0
+  ) {
+    throw new Error(
+      `Production pipeline incomplete: ${missing.join(", ")}`
+    );
+  }
 }
 
 /*
@@ -979,12 +1380,79 @@ function updateIKGate() {
 function initializeBodyState(
   root
 ) {
+  assertModelRoot(
+    root
+  );
+
+  assertSkinnedMesh(
+    skinnedMesh
+  );
+
+  assertSkeleton(
+    skinnedMesh
+  );
+
+  root.updateMatrixWorld(
+    true
+  );
+
   const box =
     new THREE.Box3()
-      .setFromObject(root);
+      .setFromObject(
+        root
+      );
+
+  if (box.isEmpty()) {
+    throw new Error(
+      "Cannot initialize BodyState: model bounds empty"
+    );
+  }
 
   bodyState =
     new BodyState();
+
+  /*
+   * Initial world reference.
+   *
+   * This is only the initial flat-ground backend
+   * height. It is NOT the runtime contact authority.
+   */
+  const groundY =
+    box.min.y;
+
+  surfaceQuery =
+    new SurfaceQuery({
+      groundY,
+
+      defaultSurfaceId:
+        "ground",
+
+      defaultSurfaceType:
+        "unknown",
+    });
+
+  contactPerception =
+    new ContactPerception({
+      root,
+
+      skeleton,
+
+      skinnedMesh,
+
+      surfaceQuery,
+
+      contactSeparation:
+        0.035,
+
+      minConfidence:
+        0.4,
+    });
+
+  /*
+   * Full mesh analysis / probe baking belongs
+   * to initialization, not the frame hot loop.
+   */
+  contactPerception.initialize();
 
   bodyStateBinder =
     new BodyStateBinder({
@@ -996,14 +1464,15 @@ function initializeBodyState(
 
       bodyState,
 
-      groundY:
-        box.min.y,
+      groundY,
 
       contactDistance:
         0.08,
 
       contactVelocityThreshold:
         0.35,
+
+      contactPerception,
     });
 
   taskSet =
@@ -1068,21 +1537,112 @@ function initializeBodyState(
   bodyStateLastReport =
     0;
 
+  assertProductionPipeline();
+
   console.log(
     "[AstraWay] Production runtime initialized",
     {
+      skeletonBones:
+        skeleton.bones.length,
+
+      groundY,
+
       solver:
         constraintSolver.getStats(),
 
       writer:
         poseWriter.snapshot(),
+
+      perception:
+        "ContactPerception + SurfaceQuery",
     }
   );
 }
 
 /*
  * =======================================================
- * BODY → TASK → CONSTRAINT → DLS → POSE
+ * DIAGNOSTIC FORMATTERS
+ * =======================================================
+ */
+
+function formatDiagnostic(
+  diagnostic
+) {
+  const safe =
+    diagnostic || {};
+
+  const dy =
+    Number.isFinite(
+      safe.dy
+    )
+      ? safe.dy.toFixed(3)
+      : "INF";
+
+  const surfaceY =
+    Number.isFinite(
+      safe.footSurfaceY
+    )
+      ? safe.footSurfaceY.toFixed(3)
+      : "INF";
+
+  const surfaceDy =
+    Number.isFinite(
+      safe.footSurfaceDy
+    )
+      ? safe.footSurfaceDy.toFixed(3)
+      : "INF";
+
+  const vertices =
+    Number.isFinite(
+      safe.footSurfaceVertices
+    )
+      ? safe.footSurfaceVertices
+      : 0;
+
+  const vy =
+    Number.isFinite(
+      safe.verticalVelocity
+    )
+      ? safe.verticalVelocity.toFixed(3)
+      : "INF";
+
+  const near =
+    safe.nearGround
+      ? "1"
+      : "0";
+
+  const stable =
+    safe.stableEnough
+      ? "1"
+      : "0";
+
+  const confidence =
+    Number.isFinite(
+      safe.confidence
+    )
+      ? safe.confidence.toFixed(2)
+      : "0";
+
+  return (
+    `dy ${dy} ` +
+    `surfY ${surfaceY} ` +
+    `sDy ${surfaceDy} ` +
+    `vtx ${vertices} ` +
+    `vy ${vy} ` +
+    `near ${near} ` +
+    `stable ${stable} ` +
+    `conf ${confidence}`
+  );
+}
+
+/*
+ * =======================================================
+ * PRODUCTION FRAME
+ *
+ * The pipeline is intentionally linear.
+ *
+ * No gameplay decisions live here.
+ * No bone transforms are written here.
  * =======================================================
  */
 
@@ -1090,18 +1650,13 @@ function updateBodyState(
   dt
 ) {
   if (
-    !bodyStateBinder ||
-    !bodyState ||
-    !contactTaskGenerator ||
-    !taskSet ||
-    !taskResolver ||
-    !constraintSet ||
-    !taskConstraintBuilder ||
-    !constraintSolver ||
-    !poseWriter
+    runtimePhase !==
+    RUNTIME_PHASE.READY
   ) {
     return;
   }
+
+  assertProductionPipeline();
 
   bodyStateBinder.update(
     dt
@@ -1130,6 +1685,13 @@ function updateBodyState(
       solverResult
     );
 
+  /*
+   * The solver returns a delta.
+   * PoseWriter applies it.
+   *
+   * Only after writing the pose do we refresh
+   * world matrices for the next perception pass.
+   */
   if (model) {
     model.updateMatrixWorld(
       true
@@ -1141,6 +1703,10 @@ function updateBodyState(
   const now =
     performance.now();
 
+  /*
+   * Runtime status is deliberately throttled.
+   * The simulation itself is NOT throttled.
+   */
   if (
     now -
       bodyStateLastReport <
@@ -1171,13 +1737,16 @@ function updateBodyState(
     "missing";
 
   const diagnostics =
-    bodyStateBinder.getDiagnostics?.() ?? {};
+    bodyStateBinder.getDiagnostics?.() ??
+    {};
 
   const leftDiagnostics =
-    diagnostics.left ?? {};
+    diagnostics.left ??
+    {};
 
   const rightDiagnostics =
-    diagnostics.right ?? {};
+    diagnostics.right ??
+    {};
 
   const support =
     bodyState.getSupportCount?.() ??
@@ -1207,77 +1776,40 @@ function updateBodyState(
 
   const conflicts =
     resolvedTaskPlan
-      ?.conflicts?.length ??
+      ?.conflicts
+      ?.length ??
     0;
 
   const written =
     poseWriteResult?.applied ??
     0;
 
-  const formatDiagnostic =
-    (diagnostic) => {
-      const dy =
-        Number.isFinite(
-          diagnostic.dy
-        )
-          ? diagnostic.dy.toFixed(3)
-          : "INF";
+  const tasks =
+    taskSet.enabledCount?.() ??
+    0;
 
-      const surfaceY =
-        Number.isFinite(
-          diagnostic.footSurfaceY
-        )
-          ? diagnostic.footSurfaceY.toFixed(3)
-          : "INF";
+  const hard =
+    resolvedTaskPlan?.hard
+      ?.length ??
+    0;
 
-      const surfaceDy =
-        Number.isFinite(
-          diagnostic.footSurfaceDy
-        )
-          ? diagnostic.footSurfaceDy.toFixed(3)
-          : "INF";
+  const soft =
+    resolvedTaskPlan?.soft
+      ?.length ??
+    0;
 
-      const vertices =
-        Number.isFinite(
-          diagnostic.footSurfaceVertices
-        )
-          ? diagnostic.footSurfaceVertices
-          : 0;
-
-      const vy =
-        Number.isFinite(
-          diagnostic.verticalVelocity
-        )
-          ? diagnostic.verticalVelocity.toFixed(3)
-          : "INF";
-
-      const near =
-        diagnostic.nearGround
-          ? "1"
-          : "0";
-
-      const stable =
-        diagnostic.stableEnough
-          ? "1"
-          : "0";
-
-      return (
-        `dy ${dy} ` +
-        `surfY ${surfaceY} ` +
-        `sDy ${surfaceDy} ` +
-        `vtx ${vertices} ` +
-        `vy ${vy} ` +
-        `near ${near} ` +
-        `stable ${stable}`
-      );
-    };
+  const constraints =
+    constraintSet.enabledCount?.() ??
+    0;
 
   setStatus(
-    `DLS ${solverStatus.toUpperCase()} | ` +
-    `tasks ${taskSet.enabledCount()} | ` +
-    `hard ${resolvedTaskPlan?.hard?.length ?? 0} | ` +
-    `soft ${resolvedTaskPlan?.soft?.length ?? 0} | ` +
-    `constraints ${constraintSet.enabledCount()} | ` +
+    `DLS ${String(
+      solverStatus
+    ).toUpperCase()} | ` +
+    `tasks ${tasks} | ` +
+    `hard ${hard} | ` +
+    `soft ${soft} | ` +
+    `constraints ${constraints} | ` +
     `conflicts ${conflicts} | ` +
     `poseDelta ${poseDelta} | ` +
     `written ${written} | ` +
@@ -1290,10 +1822,8 @@ function updateBodyState(
   );
 
   if (
-    bodyStateFrames ===
-      1 ||
-    bodyStateFrames % 60 ===
-      0
+    bodyStateFrames === 1 ||
+    bodyStateFrames % 60 === 0
   ) {
     console.log(
       "[AstraWay] CONTACT DIAGNOSTICS",
@@ -1345,15 +1875,25 @@ function updateBodyState(
 
 /*
  * =======================================================
- * LOAD MODEL
+ * MODEL LOADING
  * =======================================================
  */
 
 async function loadModel() {
   try {
+    setRuntimePhase(
+      RUNTIME_PHASE.LOADING
+    );
+
     setStatus(
       "1/10 — Loading XBot…"
     );
+
+    /*
+     * ---------------------------------------------------
+     * 1. Fetch
+     * ---------------------------------------------------
+     */
 
     const response =
       await timeout(
@@ -1381,6 +1921,21 @@ async function loadModel() {
         "Read GLB"
       );
 
+    if (
+      !buffer ||
+      buffer.byteLength === 0
+    ) {
+      throw new Error(
+        "XBot GLB buffer is empty"
+      );
+    }
+
+    /*
+     * ---------------------------------------------------
+     * 2. Canonical skeleton
+     * ---------------------------------------------------
+     */
+
     setStatus(
       "2/10 — Canonicalizing skeleton…"
     );
@@ -1400,12 +1955,19 @@ async function loadModel() {
       );
 
     if (
-      !canonicalBuffer
+      !canonicalBuffer ||
+      canonicalBuffer.byteLength === 0
     ) {
       throw new Error(
         "Canonical GLB buffer invalid"
       );
     }
+
+    /*
+     * ---------------------------------------------------
+     * 3. Parse GLB
+     * ---------------------------------------------------
+     */
 
     setStatus(
       "3/10 — Parsing GLB…"
@@ -1421,8 +1983,20 @@ async function loadModel() {
         "GLTF parse"
       );
 
+    if (!gltf?.scene) {
+      throw new Error(
+        "GLTF scene missing"
+      );
+    }
+
     model =
       gltf.scene;
+
+    /*
+     * ---------------------------------------------------
+     * 4. Find SkinnedMesh
+     * ---------------------------------------------------
+     */
 
     skinnedMesh =
       null;
@@ -1439,13 +2013,17 @@ async function loadModel() {
       }
     );
 
-    if (
-      !skinnedMesh?.skeleton
-    ) {
-      throw new Error(
-        "SkinnedMesh/Skeleton missing"
-      );
-    }
+    assertModelRoot(
+      model
+    );
+
+    assertSkinnedMesh(
+      skinnedMesh
+    );
+
+    assertSkeleton(
+      skinnedMesh
+    );
 
     skeleton =
       skinnedMesh.skeleton;
@@ -1454,10 +2032,30 @@ async function loadModel() {
       model
     );
 
+    model.updateMatrixWorld(
+      true
+    );
+
+    /*
+     * ---------------------------------------------------
+     * 5. Frame model
+     * ---------------------------------------------------
+     */
+
     const modelBox =
       frameModel(
         model
       );
+
+    setRuntimePhase(
+      RUNTIME_PHASE.VALIDATING
+    );
+
+    /*
+     * ---------------------------------------------------
+     * 6. Skeleton inspection
+     * ---------------------------------------------------
+     */
 
     setStatus(
       "4/10 — Inspecting skeleton…"
@@ -1486,6 +2084,12 @@ async function loadModel() {
       );
     }
 
+    /*
+     * ---------------------------------------------------
+     * 7. Pose Gate
+     * ---------------------------------------------------
+     */
+
     setStatus(
       "5/10 — Pose Gate…"
     );
@@ -1501,9 +2105,20 @@ async function loadModel() {
       );
     }
 
+    console.log(
+      "[AstraWay] POSE GATE GREEN",
+      pose
+    );
+
     setStatus(
       `6/10 — Pose Gate GREEN ${pose.passed}/${pose.total}`
     );
+
+    /*
+     * ---------------------------------------------------
+     * 8. Controlled FK propagation
+     * ---------------------------------------------------
+     */
 
     const controlled =
       runControlledPoseTest(
@@ -1518,13 +2133,37 @@ async function loadModel() {
       );
     }
 
+    console.log(
+      "[AstraWay] CONTROLLED POSE GREEN",
+      controlled
+    );
+
     setStatus(
       `7/10 — Controlled Pose GREEN ${controlled.passed}/${controlled.total}`
+    );
+
+    /*
+     * ---------------------------------------------------
+     * 9. Production Character Core
+     * ---------------------------------------------------
+     */
+
+    setRuntimePhase(
+      RUNTIME_PHASE.INITIALIZING
     );
 
     initializeBodyState(
       model
     );
+
+    /*
+     * ---------------------------------------------------
+     * 10. Optional solver bake-off
+     *
+     * These are explicit test modes.
+     * They do not alter production initialization.
+     * ---------------------------------------------------
+     */
 
     const params =
       new URLSearchParams(
@@ -1581,19 +2220,44 @@ async function loadModel() {
       return;
     }
 
+    /*
+     * ---------------------------------------------------
+     * Production READY
+     * ---------------------------------------------------
+     */
+
+    runtimePhase =
+      RUNTIME_PHASE.READY;
+
+    modelLoadedAt =
+      performance.now();
+
+    const loadTime =
+      modelLoadedAt -
+      runtimeStartedAt;
+
     setStatus(
       `DLS PRODUCTION READY — ` +
       `skeleton ${skeleton.bones.length} bones | ` +
       `damping ${constraintSolver.damping} | ` +
       `poseWriter ON | ` +
-      `ground ${modelBox.min.y.toFixed(3)}`
+      `ground ${modelBox.min.y.toFixed(3)} | ` +
+      `perception ON`
     );
 
     console.log(
       "[AstraWay] DLS PRODUCTION READY",
       {
+        phase:
+          runtimePhase,
+
         skeletonBones:
           skeleton.bones.length,
+
+        loadTimeMs:
+          Math.round(
+            loadTime
+          ),
 
         solver:
           constraintSolver.getStats(),
@@ -1603,7 +2267,13 @@ async function loadModel() {
 
         pipeline:
           [
+            "WORLD",
+            "SurfaceQuery",
+            "ContactPerception",
+            "ContactEvidence",
             "BodyStateBinder",
+            "ContactState",
+            "BodyState",
             "ContactTaskGenerator",
             "TaskResolver",
             "TaskConstraintBuilder",
@@ -1615,13 +2285,10 @@ async function loadModel() {
     );
 
   } catch (error) {
-    console.error(
-      "[AstraWay] Character Lab ERROR",
-      error
+    failRuntime(
+      error,
+      "Character Lab ERROR"
     );
-
-    status.textContent =
-      `❌ ${error.message}`;
   }
 }
 
@@ -1630,9 +2297,6 @@ async function loadModel() {
  * RENDER LOOP
  * =======================================================
  */
-
-let lastTime =
-  performance.now();
 
 function animate() {
   requestAnimationFrame(
@@ -1643,23 +2307,49 @@ function animate() {
     performance.now();
 
   let dt =
-    (now - lastTime) /
+    (
+      now -
+      lastFrameTime
+    ) /
     1000;
 
-  lastTime =
+  lastFrameTime =
     now;
 
-  dt =
-    Math.min(
-      dt,
-      0.05
+  /*
+   * Prevent huge simulation jumps after
+   * tab switching / browser throttling.
+   */
+  if (
+    !Number.isFinite(dt) ||
+    dt < 0
+  ) {
+    dt = 0;
+  }
+
+  if (
+    dt > 0.05
+  ) {
+    droppedFrameCount++;
+    dt = 0.05;
+  }
+
+  frameCount++;
+
+  /*
+   * Gate 7 is intentionally independent
+   * from production Character Core.
+   */
+  if (
+    runtimePhase ===
+    RUNTIME_PHASE.READY
+  ) {
+    updateIKGate();
+
+    updateBodyState(
+      dt
     );
-
-  updateIKGate();
-
-  updateBodyState(
-    dt
-  );
+  }
 
   renderer.render(
     scene,
@@ -1673,34 +2363,56 @@ function animate() {
  * =======================================================
  */
 
+function handleResize() {
+  const width =
+    Math.max(
+      window.innerWidth,
+      1
+    );
+
+  const height =
+    Math.max(
+      window.innerHeight,
+      1
+    );
+
+  camera.aspect =
+    width /
+    height;
+
+  camera.updateProjectionMatrix();
+
+  renderer.setSize(
+    width,
+    height,
+    false
+  );
+
+  renderer.setPixelRatio(
+    Math.min(
+      window.devicePixelRatio || 1,
+      2
+    )
+  );
+}
+
 window.addEventListener(
   "resize",
-  () => {
-    camera.aspect =
-      window.innerWidth /
-      window.innerHeight;
-
-    camera.updateProjectionMatrix();
-
-    renderer.setSize(
-      window.innerWidth,
-      window.innerHeight
-    );
-
-    renderer.setPixelRatio(
-      Math.min(
-        window.devicePixelRatio,
-        2
-      )
-    );
+  handleResize,
+  {
+    passive: true,
   }
 );
 
 /*
  * =======================================================
- * START
+ * BOOT
  * =======================================================
  */
+
+setRuntimePhase(
+  RUNTIME_PHASE.BOOT
+);
 
 loadModel();
 
