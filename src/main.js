@@ -19,6 +19,7 @@ import { ContactTaskGenerator } from "./character/ContactTaskGenerator.js";
 import { TaskResolver } from "./character/TaskResolver.js";
 import { ConstraintSet } from "./character/ConstraintSet.js";
 import { TaskConstraintBuilder } from "./character/TaskConstraintBuilder.js";
+import { ConstraintSolver } from "./character/ConstraintSolver.js";
 
 import {
   runClosedChainViability,
@@ -170,6 +171,36 @@ let taskResolver = null;
 let constraintSet = null;
 let taskConstraintBuilder = null;
 let resolvedTaskPlan = null;
+
+/*
+ * -------------------------------------------------------
+ * CONSTRAINT SOLVER
+ * -------------------------------------------------------
+ *
+ * Pipeline:
+ *
+ * BodyState
+ *    ↓
+ * ContactState
+ *    ↓
+ * TaskSet
+ *    ↓
+ * TaskResolver
+ *    ↓
+ * ConstraintSet
+ *    ↓
+ * ConstraintSolver
+ *
+ * ConstraintSolver пока НЕ пишет
+ * в Skeleton.
+ *
+ * Он только принимает
+ * ConstraintSet и формирует
+ * нормализованный solver input.
+ */
+
+let constraintSolver = null;
+let solverResult = null;
 
 let bodyStateFrames = 0;
 let bodyStateLastReport = 0;
@@ -942,7 +973,7 @@ function updateIKGate() {
 
 /*
  * -------------------------------------------------------
- * BODY STATE + CONTACT TASKS
+ * BODY STATE + CONTACT TASKS + CONSTRAINT SOLVER
  * -------------------------------------------------------
  */
 
@@ -983,7 +1014,23 @@ function initializeBodyState(
       constraintSet,
     });
 
+  /*
+   * ConstraintSolver получает
+   * тот же Skeleton, который
+   * используется BodyStateBinder.
+   *
+   * Пока solver только готовит
+   * solver input.
+   *
+   * Он НЕ пишет в кости.
+   */
+  constraintSolver =
+    new ConstraintSolver({
+      skeleton,
+    });
+
   resolvedTaskPlan = null;
+  solverResult = null;
 
   contactTaskGenerator =
     new ContactTaskGenerator({
@@ -1006,6 +1053,9 @@ function initializeBodyState(
 
       tasks:
         taskSet.count(),
+
+      solver:
+        constraintSolver.snapshot(),
     }
   );
 }
@@ -1020,36 +1070,87 @@ function updateBodyState(
     !taskSet ||
     !taskResolver ||
     !constraintSet ||
-    !taskConstraintBuilder
+    !taskConstraintBuilder ||
+    !constraintSolver
   ) {
     return;
   }
 
+  /*
+   * 1.
+   *
+   * Skeleton
+   *    ↓
+   * BodyStateBinder
+   *    ↓
+   * BodyState + ContactState
+   */
   bodyStateBinder.update(
     dt
   );
 
   /*
-   * ContactState уже обновлён.
+   * 2.
    *
-   * Теперь контакт может
-   * породить Task.
-   *
-   * TaskGenerator ничего
-   * не меняет в Skeleton.
+   * ContactState
+   *    ↓
+   * ContactTaskGenerator
+   *    ↓
+   * TaskSet
    */
   contactTaskGenerator.update(
     bodyState
   );
 
+  /*
+   * 3.
+   *
+   * TaskSet
+   *    ↓
+   * TaskResolver
+   *    ↓
+   * ResolvedTaskPlan
+   */
   resolvedTaskPlan =
     taskResolver.resolve(
       taskSet
     );
 
+  /*
+   * 4.
+   *
+   * ResolvedTaskPlan
+   *    ↓
+   * TaskConstraintBuilder
+   *    ↓
+   * ConstraintSet
+   */
   taskConstraintBuilder.update(
     resolvedTaskPlan
   );
+
+  /*
+   * 5.
+   *
+   * ConstraintSet
+   *    ↓
+   * ConstraintSolver
+   *    ↓
+   * SolverResult
+   *
+   * ВАЖНО:
+   * здесь ещё нет изменения позы.
+   */
+  solverResult =
+    constraintSolver.solve(
+      constraintSet,
+      {
+        dt,
+        time:
+          performance.now() /
+          1000,
+      }
+    );
 
   bodyStateFrames++;
 
@@ -1102,6 +1203,14 @@ function updateBodyState(
   const com =
     bodyState.com;
 
+  const solverStatus =
+    solverResult?.status ??
+    "none";
+
+  const solverConstraints =
+    solverResult?.constraints ??
+    0;
+
   setStatus(
     `BODY STATE GREEN — ` +
     `COM ${com.x.toFixed(2)},${com.y.toFixed(2)},${com.z.toFixed(2)} | ` +
@@ -1112,6 +1221,7 @@ function updateBodyState(
     `tasks ${taskSet.enabledCount()} | ` +
     `hard ${resolvedTaskPlan?.hard.length ?? 0} | ` +
     `constraints ${constraintSet.enabledCount()} | ` +
+    `solver ${solverStatus}:${solverConstraints} | ` +
     `conflicts ${resolvedTaskPlan?.conflicts.length ?? 0}`
   );
 
@@ -1171,6 +1281,12 @@ function updateBodyState(
 
         constraints:
           constraintSet.snapshot(),
+
+        solver:
+          constraintSolver.snapshot(),
+
+        solverResult:
+          solverResult,
       }
     );
   }
@@ -1429,38 +1545,38 @@ async function loadModel() {
      * NORMAL CHARACTER RUNTIME
      * ---------------------------------------------------
      *
-     * Сейчас:
-     *
      * Skeleton
-     *   ↓
+     *    ↓
      * BodyStateBinder
-     *   ↓
+     *    ↓
      * ContactState
-     *   ↓
+     *    ↓
      * ContactTaskGenerator
-     *   ↓
+     *    ↓
      * TaskSet
-     *   ↓
+     *    ↓
      * TaskResolver
-     *   ↓
+     *    ↓
      * TaskConstraintBuilder
-     *   ↓
+     *    ↓
      * ConstraintSet
+     *    ↓
+     * ConstraintSolver
      *
-     * НЕТ:
+     * ПОКА НЕТ:
      *
      * Gait
-     * IK
-     * Solver
      * Pose Writer
+     * production IK
      */
 
     setStatus(
-      `BODY STATE GREEN — runtime initialized | ` +
+      `CONSTRAINT SOLVER GREEN — runtime initialized | ` +
       `ground ${modelBox.min.y.toFixed(3)} | ` +
       `tasks ${taskSet.enabledCount()} | ` +
       `hard ${resolvedTaskPlan?.hard.length ?? 0} | ` +
       `constraints ${constraintSet.enabledCount()} | ` +
+      `solver ${solverResult?.status ?? "none"} | ` +
       `conflicts ${resolvedTaskPlan?.conflicts.length ?? 0}`
     );
 
@@ -1531,6 +1647,8 @@ function animate() {
    * TaskResolver
    *    ↓
    * ConstraintSet
+   *    ↓
+   * ConstraintSolver
    */
   updateBodyState(
     dt
