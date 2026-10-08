@@ -902,7 +902,7 @@ export class ContactPerception {
         bestProbeIndex = i;
       }
     }
-
+        evidence.nearProbeCount = nearCount;
     if (!validCount) {
       return;
     }
