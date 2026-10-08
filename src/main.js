@@ -199,14 +199,8 @@ let taskConstraintBuilder = null;
 
 let resolvedTaskPlan = null;
 
-/*
- * Production solver.
- */
 let constraintSolver = null;
 
-/*
- * Единственный production pose writer.
- */
 let poseWriter = null;
 
 let solverResult = null;
@@ -998,6 +992,8 @@ function initializeBodyState(
 
       skeleton,
 
+      skinnedMesh,
+
       bodyState,
 
       groundY:
@@ -1029,12 +1025,6 @@ function initializeBodyState(
       constraintSet,
     });
 
-  /*
-   * REAL DLS SOLVER.
-   *
-   * Only parameters actually implemented
-   * by ConstraintSolver are passed here.
-   */
   constraintSolver =
     new ConstraintSolver({
       skeleton,
@@ -1052,9 +1042,6 @@ function initializeBodyState(
         true,
     });
 
-  /*
-   * ONLY production pose writer.
-   */
   poseWriter =
     new PoseWriter({
       skeleton,
@@ -1116,97 +1103,33 @@ function updateBodyState(
     return;
   }
 
-  /*
-   * 1.
-   *
-   * CURRENT SKELETON
-   *      ↓
-   * BodyStateBinder
-   *      ↓
-   * BodyState + ContactState
-   */
   bodyStateBinder.update(
     dt
   );
 
-  /*
-   * 2.
-   *
-   * ContactState
-   *      ↓
-   * ContactTaskGenerator
-   *      ↓
-   * TaskSet
-   */
   contactTaskGenerator.update(
     bodyState
   );
 
-  /*
-   * 3.
-   *
-   * TaskSet
-   *      ↓
-   * TaskResolver
-   *      ↓
-   * ResolvedTaskPlan
-   */
   resolvedTaskPlan =
     taskResolver.resolve(
       taskSet
     );
 
-  /*
-   * 4.
-   *
-   * ResolvedTaskPlan
-   *      ↓
-   * TaskConstraintBuilder
-   *      ↓
-   * ConstraintSet
-   */
   taskConstraintBuilder.update(
     resolvedTaskPlan
   );
 
-  /*
-   * 5.
-   *
-   * ConstraintSet
-   *      ↓
-   * DLS
-   *      ↓
-   * deltaPose
-   *
-   * Solver НЕ пишет кости.
-   */
   solverResult =
     constraintSolver.solve(
       constraintSet
     );
 
-  /*
-   * 6.
-   *
-   * deltaPose
-   *      ↓
-   * PoseWriter
-   *      ↓
-   * Bone quaternion
-   */
   poseWriteResult =
     poseWriter.write(
       solverResult
     );
 
-  /*
-   * 7.
-   *
-   * FK update.
-   *
-   * Это обновление derived world
-   * matrices после записи позы.
-   */
   if (model) {
     model.updateMatrixWorld(
       true
@@ -1300,6 +1223,27 @@ function updateBodyState(
           ? diagnostic.dy.toFixed(3)
           : "INF";
 
+      const surfaceY =
+        Number.isFinite(
+          diagnostic.footSurfaceY
+        )
+          ? diagnostic.footSurfaceY.toFixed(3)
+          : "INF";
+
+      const surfaceDy =
+        Number.isFinite(
+          diagnostic.footSurfaceDy
+        )
+          ? diagnostic.footSurfaceDy.toFixed(3)
+          : "INF";
+
+      const vertices =
+        Number.isFinite(
+          diagnostic.footSurfaceVertices
+        )
+          ? diagnostic.footSurfaceVertices
+          : 0;
+
       const vy =
         Number.isFinite(
           diagnostic.verticalVelocity
@@ -1318,8 +1262,13 @@ function updateBodyState(
           : "0";
 
       return (
-        `dy ${dy} vy ${vy} ` +
-        `near ${near} stable ${stable}`
+        `dy ${dy} ` +
+        `surfY ${surfaceY} ` +
+        `sDy ${surfaceDy} ` +
+        `vtx ${vertices} ` +
+        `vy ${vy} ` +
+        `near ${near} ` +
+        `stable ${stable}`
       );
     };
 
@@ -1573,20 +1522,9 @@ async function loadModel() {
       `7/10 — Controlled Pose GREEN ${controlled.passed}/${controlled.total}`
     );
 
-    /*
-     * BODY / PRODUCTION SOLVER
-     */
     initializeBodyState(
       model
     );
-
-    /*
-     * Gate 7 is already an independent
-     * laboratory gate.
-     *
-     * We do not run CCD IK inside the
-     * production DLS pipeline.
-     */
 
     const params =
       new URLSearchParams(
@@ -1717,29 +1655,8 @@ function animate() {
       0.05
     );
 
-  /*
-   * Gate 7 remains separate.
-   *
-   * CCD IK is NOT part of the
-   * production DLS pipeline.
-   */
   updateIKGate();
 
-  /*
-   * Production:
-   *
-   * measure
-   *   ↓
-   * tasks
-   *   ↓
-   * constraints
-   *   ↓
-   * DLS
-   *   ↓
-   * PoseWriter
-   *   ↓
-   * Skeleton
-   */
   updateBodyState(
     dt
   );
