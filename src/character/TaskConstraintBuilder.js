@@ -6,6 +6,10 @@ import {
   Constraint,
 } from "./Constraint.js";
 
+import {
+  BONE_MAP,
+} from "./BoneMap.js";
+
 export class TaskConstraintBuilder {
   constructor({
     constraintSet,
@@ -28,15 +32,24 @@ export class TaskConstraintBuilder {
     }
 
     /*
-     * Важно:
+     * Builder получает только RESOLVED tasks.
      *
-     * Мы строим constraints
-     * только из RESOLVED tasks.
-     *
-     * Сам Builder:
+     * Он:
      * - не двигает кости;
      * - не вызывает IK;
-     * - не меняет BodyState.
+     * - не меняет BodyState;
+     * - не меняет ContactState.
+     *
+     * Его задача:
+     *
+     * logical task
+     *      ↓
+     * constraint
+     *
+     * Здесь же происходит единственная
+     * адаптация:
+     *
+     * logical bone → canonical THREE.Bone name
      */
 
     const tasks = [
@@ -48,16 +61,12 @@ export class TaskConstraintBuilder {
       new Set();
 
     for (const task of tasks) {
-      if (
-        !task?.enabled
-      ) {
+      if (!task?.enabled) {
         continue;
       }
 
       const constraint =
-        this._buildConstraint(
-          task
-        );
+        this._buildConstraint(task);
 
       if (!constraint) {
         continue;
@@ -106,26 +115,50 @@ export class TaskConstraintBuilder {
     }
 
     /*
-     * Неизвестный Task пока
-     * не превращаем в
-     * случайное constraint.
+     * Неизвестные типы задач
+     * явно игнорируются.
      *
      * Новые типы добавляются
-     * явно.
+     * отдельными builders.
      */
     return null;
   }
 
   _buildContactConstraint(task) {
-    if (
-      !task.target
-    ) {
+    if (!task.target) {
+      return null;
+    }
+
+    const logicalBone =
+      task.metadata?.bone ??
+      null;
+
+    if (!logicalBone) {
+      return null;
+    }
+
+    /*
+     * Task работает с нашей
+     * логической анатомией.
+     *
+     * Solver работает с реальными
+     * именами THREE.Bone.
+     *
+     * Поэтому переводим здесь:
+     *
+     * foot_L → LeftFoot
+     */
+    const canonicalBone =
+      BONE_MAP[logicalBone] ??
+      null;
+
+    if (!canonicalBone) {
       return null;
     }
 
     const target =
       task.target instanceof THREE.Vector3
-        ? task.target
+        ? task.target.clone()
         : new THREE.Vector3()
             .fromArray(
               task.target
@@ -169,12 +202,26 @@ export class TaskConstraintBuilder {
         taskType:
           task.type,
 
+        /*
+         * Для диагностики сохраняем
+         * оба уровня идентичности.
+         */
+        logicalBone:
+          logicalBone,
+
+        /*
+         * ЭТО значение читает
+         * ConstraintSolver.
+         */
         bone:
-          task.metadata?.bone ??
-          null,
+          canonicalBone,
 
         surfaceId:
           task.metadata?.surfaceId ??
+          null,
+
+        surfaceType:
+          task.metadata?.surfaceType ??
           null,
 
         normal:
@@ -187,6 +234,14 @@ export class TaskConstraintBuilder {
         isSupport:
           task.metadata?.isSupport ??
           false,
+
+        confidence:
+          task.metadata?.confidence ??
+          0,
+
+        separation:
+          task.metadata?.separation ??
+          Infinity,
       },
     });
   }
