@@ -1,3 +1,5 @@
+// src/character/BodyStateBinder.js
+
 import * as THREE from "three";
 
 import {
@@ -35,6 +37,7 @@ export class BodyStateBinder {
   constructor({
     root,
     skeleton,
+    skinnedMesh = null,
     bodyState,
     groundY = 0,
     contactDistance = 0.045,
@@ -60,6 +63,7 @@ export class BodyStateBinder {
 
     this.root = root;
     this.skeleton = skeleton;
+    this.skinnedMesh = skinnedMesh;
     this.bodyState = bodyState;
 
     this.groundY = groundY;
@@ -81,6 +85,11 @@ export class BodyStateBinder {
         footY: NaN,
         groundY: this.groundY,
         dy: Infinity,
+
+        footSurfaceY: NaN,
+        footSurfaceDy: Infinity,
+        footSurfaceVertices: 0,
+
         verticalVelocity: 0,
         nearGround: false,
         stableEnough: false,
@@ -91,6 +100,11 @@ export class BodyStateBinder {
         footY: NaN,
         groundY: this.groundY,
         dy: Infinity,
+
+        footSurfaceY: NaN,
+        footSurfaceDy: Infinity,
+        footSurfaceVertices: 0,
+
         verticalVelocity: 0,
         nearGround: false,
         stableEnough: false,
@@ -128,6 +142,12 @@ export class BodyStateBinder {
       new THREE.Vector3();
 
     this._tmpC =
+      new THREE.Vector3();
+
+    this._skinnedVertex =
+      new THREE.Vector3();
+
+    this._worldVertex =
       new THREE.Vector3();
 
     this._contactsInitialized = false;
@@ -258,15 +278,7 @@ export class BodyStateBinder {
    * Это НЕ физический центр масс.
    *
    * Пока мы используем взвешенную
-   * анатомическую модель:
-   *
-   * pelvis / spine / chest
-   * arms
-   * legs
-   * head
-   *
-   * Позже сюда можно подключить
-   * реальные mass properties.
+   * анатомическую модель.
    */
   _measureCOM() {
     const samples = [];
@@ -458,6 +470,254 @@ export class BodyStateBinder {
       .multiplyScalar(1 / dt);
   }
 
+  /*
+   * -------------------------------------------------------
+   * FOOT GEOMETRY DIAGNOSTICS
+   * -------------------------------------------------------
+   *
+   * Это НЕ contact solver.
+   *
+   * Мы просто измеряем нижнюю точку
+   * текущей деформированной SkinnedMesh,
+   * используя вершины, на которые существенно
+   * влияют foot + toe bones.
+   *
+   * ВАЖНО:
+   * результат НЕ влияет на nearGround,
+   * plant/release или ContactState.
+   */
+
+  _measureFootSurface(
+    logicalFoot,
+    logicalToe
+  ) {
+    const mesh =
+      this.skinnedMesh;
+
+    if (
+      !mesh?.isSkinnedMesh ||
+      !mesh.geometry
+    ) {
+      return {
+        minY: NaN,
+        vertexCount: 0,
+      };
+    }
+
+    const geometry =
+      mesh.geometry;
+
+    const positionAttribute =
+      geometry.getAttribute(
+        "position"
+      );
+
+    const skinIndexAttribute =
+      geometry.getAttribute(
+        "skinIndex"
+      );
+
+    const skinWeightAttribute =
+      geometry.getAttribute(
+        "skinWeight"
+      );
+
+    if (
+      !positionAttribute ||
+      !skinIndexAttribute ||
+      !skinWeightAttribute
+    ) {
+      return {
+        minY: NaN,
+        vertexCount: 0,
+      };
+    }
+
+    const footBone =
+      this._findBone(
+        logicalFoot
+      );
+
+    const toeBone =
+      this._findBone(
+        logicalToe
+      );
+
+    if (
+      !footBone ||
+      !toeBone
+    ) {
+      return {
+        minY: NaN,
+        vertexCount: 0,
+      };
+    }
+
+    const footIndex =
+      this.skeleton.bones.indexOf(
+        footBone
+      );
+
+    const toeIndex =
+      this.skeleton.bones.indexOf(
+        toeBone
+      );
+
+    if (
+      footIndex < 0 ||
+      toeIndex < 0
+    ) {
+      return {
+        minY: NaN,
+        vertexCount: 0,
+      };
+    }
+
+    /*
+     * Only vertices with meaningful
+     * foot/toe influence participate.
+     *
+     * We deliberately use a moderate
+     * threshold so the diagnostic sees
+     * the actual shoe/foot volume without
+     * pulling the shin into the sample.
+     */
+    const influenceThreshold =
+      0.25;
+
+    let minY =
+      Infinity;
+
+    let vertexCount =
+      0;
+
+    const vertex =
+      this._skinnedVertex;
+
+    const worldVertex =
+      this._worldVertex;
+
+    const count =
+      positionAttribute.count;
+
+    for (
+      let i = 0;
+      i < count;
+      i++
+    ) {
+      let footWeight = 0;
+      let toeWeight = 0;
+
+      for (
+        let j = 0;
+        j < 4;
+        j++
+      ) {
+        const index =
+          skinIndexAttribute.getComponent(
+            i,
+            j
+          );
+
+        const weight =
+          skinWeightAttribute.getComponent(
+            i,
+            j
+          );
+
+        if (
+          index === footIndex
+        ) {
+          footWeight += weight;
+        }
+
+        if (
+          index === toeIndex
+        ) {
+          toeWeight += weight;
+        }
+      }
+
+      const footInfluence =
+        footWeight +
+        toeWeight;
+
+      if (
+        footInfluence <
+        influenceThreshold
+      ) {
+        continue;
+      }
+
+      /*
+       * Three.js returns the current
+       * skinned/morphed vertex position.
+       */
+      mesh.getVertexPosition(
+        i,
+        vertex
+      );
+
+      worldVertex
+        .copy(vertex);
+
+      mesh.localToWorld(
+        worldVertex
+      );
+
+      if (
+        worldVertex.y <
+        minY
+      ) {
+        minY =
+          worldVertex.y;
+      }
+
+      vertexCount++;
+    }
+
+    return {
+      minY:
+        Number.isFinite(minY)
+          ? minY
+          : NaN,
+
+      vertexCount,
+    };
+  }
+
+  _updateFootSurfaceDiagnostic(
+    logicalFoot,
+    logicalToe,
+    diagnostics
+  ) {
+    if (!diagnostics) {
+      return;
+    }
+
+    const surface =
+      this._measureFootSurface(
+        logicalFoot,
+        logicalToe
+      );
+
+    diagnostics.footSurfaceY =
+      surface.minY;
+
+    diagnostics.footSurfaceVertices =
+      surface.vertexCount;
+
+    diagnostics.footSurfaceDy =
+      Number.isFinite(
+        surface.minY
+      )
+        ? Math.abs(
+            surface.minY -
+            this.groundY
+          )
+        : Infinity;
+  }
+
   _measureContact(
     logicalBone,
     contactId
@@ -496,9 +756,25 @@ export class BodyStateBinder {
         diagnostics.groundY =
           this.groundY;
         diagnostics.dy = Infinity;
-        diagnostics.verticalVelocity = 0;
-        diagnostics.nearGround = false;
-        diagnostics.stableEnough = false;
+
+        diagnostics.footSurfaceY =
+          NaN;
+
+        diagnostics.footSurfaceDy =
+          Infinity;
+
+        diagnostics.footSurfaceVertices =
+          0;
+
+        diagnostics.verticalVelocity =
+          0;
+
+        diagnostics.nearGround =
+          false;
+
+        diagnostics.stableEnough =
+          false;
+
         diagnostics.phase =
           contact.phase;
       }
@@ -515,7 +791,8 @@ export class BodyStateBinder {
 
     const distance =
       Math.abs(
-        position.y - this.groundY
+        position.y -
+        this.groundY
       );
 
     const nearGround =
@@ -530,6 +807,20 @@ export class BodyStateBinder {
     const stableEnough =
       verticalVelocity <=
       this.contactVelocityThreshold;
+
+    /*
+     * GEOMETRY DIAGNOSTICS.
+     *
+     * Read current skinned foot geometry.
+     * This does NOT alter lifecycle.
+     */
+    this._updateFootSurfaceDiagnostic(
+      logicalBone,
+      logicalBone === "foot_L"
+        ? "toe_L"
+        : "toe_R",
+      diagnostics
+    );
 
     /*
      * DIAGNOSTICS:
@@ -557,6 +848,14 @@ export class BodyStateBinder {
         stableEnough;
     }
 
+    /*
+     * ВАЖНО:
+     *
+     * Здесь остаётся СТАРАЯ contact
+     * механика.
+     *
+     * footSurfaceY пока НЕ участвует.
+     */
     if (
       nearGround &&
       stableEnough
@@ -624,13 +923,6 @@ export class BodyStateBinder {
     /*
      * Hands are intentionally NOT treated
      * as floor support.
-     *
-     * Their actual environmental contact
-     * will later come from Perception /
-     * Contact Provider.
-     *
-     * We initialize their state here,
-     * but do not invent a hand contact.
      */
   }
 
