@@ -883,8 +883,10 @@ function prepareIKGate(
 
   ikSolver.setConfiguration({
     iterations: 1,
+
     thresholdTargetSq:
       0.00000001,
+
     thresholdIterSqDist:
       0.00000001,
   });
@@ -960,6 +962,8 @@ function updateIKGate() {
   console.log(
     "[AstraWay] IK GATE 7",
     {
+      pass,
+
       initialError:
         ikInitialError,
 
@@ -1026,7 +1030,10 @@ function initializeBodyState(
     });
 
   /*
-   * REAL DLS SOLVER
+   * REAL DLS SOLVER.
+   *
+   * Only parameters actually implemented
+   * by ConstraintSolver are passed here.
    */
   constraintSolver =
     new ConstraintSolver({
@@ -1035,17 +1042,14 @@ function initializeBodyState(
       damping:
         0.12,
 
-      maxIterations:
-        4,
-
-      maxChainBones:
-        12,
+      maxAngleStep:
+        0.18,
 
       positionTolerance:
         0.001,
 
-      maxStepRadians:
-        0.18,
+      enabled:
+        true,
     });
 
   /*
@@ -1081,7 +1085,7 @@ function initializeBodyState(
     "[AstraWay] Production runtime initialized",
     {
       solver:
-        constraintSolver.snapshot(),
+        constraintSolver.getStats(),
 
       writer:
         poseWriter.snapshot(),
@@ -1170,35 +1174,25 @@ function updateBodyState(
    *
    * ConstraintSet
    *      ↓
-   * REAL DLS
+   * DLS
    *      ↓
-   * SolverResult
+   * deltaPose
    *
-   * Solver НЕ пишет в Skeleton.
+   * Solver НЕ пишет кости.
    */
   solverResult =
     constraintSolver.solve(
-      constraintSet,
-      {
-        dt,
-
-        time:
-          performance.now() /
-          1000,
-      }
+      constraintSet
     );
 
   /*
    * 6.
    *
-   * SolverResult
+   * deltaPose
    *      ↓
    * PoseWriter
    *      ↓
-   * Bone local quaternion
-   *
-   * Это единственная запись
-   * production solver pipeline.
+   * Bone quaternion
    */
   poseWriteResult =
     poseWriter.write(
@@ -1208,11 +1202,10 @@ function updateBodyState(
   /*
    * 7.
    *
-   * После записи позы
-   * обновляем world matrices.
+   * FK update.
    *
-   * Следующий кадр снова
-   * измерит фактическое состояние.
+   * Это обновление derived world
+   * matrices после записи позы.
    */
   if (model) {
     model.updateMatrixWorld(
@@ -1237,12 +1230,12 @@ function updateBodyState(
     now;
 
   const leftFoot =
-    bodyStateBinder.getContact(
+    bodyStateBinder.getContact?.(
       "contact_foot_L"
     );
 
   const rightFoot =
-    bodyStateBinder.getContact(
+    bodyStateBinder.getContact?.(
       "contact_foot_R"
     );
 
@@ -1255,10 +1248,12 @@ function updateBodyState(
     "missing";
 
   const support =
-    bodyState.getSupportCount();
+    bodyState.getSupportCount?.() ??
+    0;
 
   const balance =
-    bodyState.getBalanceError();
+    bodyState.getBalanceError?.() ??
+    0;
 
   const balanceText =
     Number.isFinite(
@@ -1275,7 +1270,7 @@ function updateBodyState(
     "none";
 
   const poseDelta =
-    solverResult?.pose?.length ??
+    solverResult?.deltaPose?.length ??
     0;
 
   const conflicts =
@@ -1283,15 +1278,19 @@ function updateBodyState(
       ?.conflicts?.length ??
     0;
 
+  const written =
+    poseWriteResult?.applied ??
+    0;
+
   setStatus(
     `DLS ${solverStatus.toUpperCase()} | ` +
     `tasks ${taskSet.enabledCount()} | ` +
-    `hard ${resolvedTaskPlan?.hard.length ?? 0} | ` +
-    `soft ${resolvedTaskPlan?.soft.length ?? 0} | ` +
+    `hard ${resolvedTaskPlan?.hard?.length ?? 0} | ` +
+    `soft ${resolvedTaskPlan?.soft?.length ?? 0} | ` +
     `constraints ${constraintSet.enabledCount()} | ` +
     `conflicts ${conflicts} | ` +
     `poseDelta ${poseDelta} | ` +
-    `written ${poseWriteResult?.applied ?? 0} | ` +
+    `written ${written} | ` +
     `COM ${com.x.toFixed(2)},${com.y.toFixed(2)},${com.z.toFixed(2)} | ` +
     `L ${leftPhase} | ` +
     `R ${rightPhase} | ` +
@@ -1321,7 +1320,7 @@ function updateBodyState(
           constraintSet.snapshot(),
 
         solver:
-          constraintSolver.snapshot(),
+          constraintSolver.getStats(),
 
         solverResult,
 
@@ -1512,19 +1511,18 @@ async function loadModel() {
     );
 
     /*
-     * ===================================================
      * BODY / PRODUCTION SOLVER
-     * ===================================================
      */
-
     initializeBodyState(
       model
     );
 
     /*
-     * ===================================================
-     * OPTIONAL LAB GATES
-     * ===================================================
+     * Gate 7 is already an independent
+     * laboratory gate.
+     *
+     * We do not run CCD IK inside the
+     * production DLS pipeline.
      */
 
     const params =
@@ -1582,17 +1580,10 @@ async function loadModel() {
       return;
     }
 
-    /*
-     * ===================================================
-     * PRODUCTION RUNTIME READY
-     * ===================================================
-     */
-
     setStatus(
       `DLS PRODUCTION READY — ` +
       `skeleton ${skeleton.bones.length} bones | ` +
       `damping ${constraintSolver.damping} | ` +
-      `chain ${constraintSolver.maxChainBones} | ` +
       `poseWriter ON | ` +
       `ground ${modelBox.min.y.toFixed(3)}`
     );
@@ -1604,7 +1595,7 @@ async function loadModel() {
           skeleton.bones.length,
 
         solver:
-          constraintSolver.snapshot(),
+          constraintSolver.getStats(),
 
         writer:
           poseWriter.snapshot(),
@@ -1664,11 +1655,10 @@ function animate() {
     );
 
   /*
-   * Gate 7 остаётся отдельным
-   * лабораторным тестом.
+   * Gate 7 remains separate.
    *
-   * В production pipeline
-   * CCD IK не вызывается.
+   * CCD IK is NOT part of the
+   * production DLS pipeline.
    */
   updateIKGate();
 
