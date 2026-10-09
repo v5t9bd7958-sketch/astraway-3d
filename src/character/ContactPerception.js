@@ -28,8 +28,8 @@ const EPSILON = 1e-8;
  *   confidence      = nearProbeCount / probeCount.
  *   spread          = max separation - min separation.
  *
- * Temporal confirmation and surface safety checks remain separate
- * from confidence.
+ * Temporary diagnostic logging is enabled to identify
+ * why valid foot probes are not becoming near-contact probes.
  */
 
 export class ContactPerception {
@@ -220,10 +220,12 @@ export class ContactPerception {
     this._lastUpdateTime = null;
 
     this._probeSets = new Map();
+
     this._probeSets.set(
       "foot_L",
       this._createProbeSet("foot_L", "L")
     );
+
     this._probeSets.set(
       "foot_R",
       this._createProbeSet("foot_R", "R")
@@ -690,6 +692,7 @@ export class ContactPerception {
       const candidate = selected[i];
 
       set.sampleVertices[i] = candidate.index;
+
       set.samples[i].set(
         candidate.x,
         candidate.y,
@@ -814,6 +817,25 @@ export class ContactPerception {
       const separation = result.separation;
 
       /*
+       * TEMPORARY DIAGNOSTIC:
+       * Print the raw separation and the exact near-contact decision.
+       * This does not change the contact calculation.
+       */
+      console.log("[AstraWay ContactProbe]", {
+        side: set.side,
+        probe: i,
+        separation: Number.isFinite(separation)
+          ? Number(separation.toFixed(4))
+          : separation,
+        contactDistance: this.contactDistance,
+        maxPenetration: this.maxPenetration,
+        near: Number.isFinite(separation)
+          && separation <= this.contactDistance,
+        rejectedByPenetration: Number.isFinite(separation)
+          && separation < -this.maxPenetration,
+      });
+
+      /*
        * Spread uses all valid, finite separation measurements.
        * It is diagnostic only; it does not suppress contact.
        */
@@ -892,9 +914,11 @@ export class ContactPerception {
          * Do not include malformed points in the accepted surface sum.
          */
         acceptedCount--;
+
         if (near) {
           acceptedNearCount--;
         }
+
         continue;
       }
 
@@ -1084,4 +1108,3 @@ export class ContactPerception {
 }
 
 export default ContactPerception;
-
