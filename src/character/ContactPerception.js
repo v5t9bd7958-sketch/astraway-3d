@@ -1,122 +1,227 @@
-// src/character/ContactPerception.js
+
+ // src/character/ContactPerception.js
 import * as THREE from "three";
 import { BONE_MAP } from "./BoneMap.js";
-/**
- * ContactPerception
+
+/*
+ * AstraWay Character Core
  *
- * Perception layer of Character Core.
- *
- * SkinnedMesh
- *   -> runtime geometry probes
+ * WORLD / SKINNED GEOMETRY
  *   -> SurfaceQuery
- *   -> ContactEvidence
+ *   -> height + velocity tests
+ *   -> temporal contact evidence
+ *   -> ContactState
  *
- * This class observes geometry and reports evidence.
- * It does not establish contacts, create tasks, choose gait,
- * perform traversal, or write bones.
+ * IMPORTANT:
+ * This module observes the character only.
+ * It never writes bones, creates tasks, performs IK,
+ * locks a foot pose, or changes ContactState directly.
+ *
+ * Adapted from established foot-contact detection principles:
+ * - contact is based on height AND world-space velocity;
+ * - multiple frames confirm contact;
+ * - retention uses hysteresis to reduce flicker.
  */
+
+const EPSILON = 1e-8;
+
 export class ContactPerception {
   static DEFAULT_CONFIG = Object.freeze({
     footInfluenceMin: 0.35,
     shinInfluenceMax: 0.30,
+
     targetProbes: 5,
-    contactSeparation: 0.035,
-    queryMaxDistance: 0.20,
-    minConfidence: 0.40,
     clusterY: 0.03,
-    normalMinY: 0.45,
     maxFootSpan: 0.22,
+
+    // Adapted from the reference implementation.
+    heightThreshold: 0.08,
+    velocityThreshold: 1.0,
+    voteFrames: 5,
+
+    // Surface-query limits.
+    queryMaxDistance: 0.20,
+    maxPenetration: 0.035,
+    minConfidence: 0.40,
+    normalMinY: 0.45,
+
+    // Velocity is unreliable if the frame interval is invalid.
+    fallbackDeltaTime: 1 / 60,
   });
+
   constructor({
     root,
     skeleton,
     skinnedMesh,
     surfaceQuery,
-    contactSeparation,
-    minConfidence,
+
     footInfluenceMin,
     shinInfluenceMax,
     targetProbes,
     clusterY,
-    queryMaxDistance,
-    normalMinY,
     maxFootSpan,
+
+    heightThreshold,
+    velocityThreshold,
+    voteFrames,
+
+    contactSeparation,
+    queryMaxDistance,
+    minConfidence,
+    normalMinY,
+    maxPenetration,
+    fallbackDeltaTime,
   } = {}) {
     if (!root) {
       throw new TypeError("ContactPerception: root is required");
     }
-    if (!skeleton) {
+
+    if (!skeleton?.bones) {
       throw new TypeError("ContactPerception: skeleton is required");
     }
-    if (!skinnedMesh) {
-      throw new TypeError("ContactPerception: skinnedMesh is required");
-    }
-    if (!surfaceQuery) {
-      throw new TypeError("ContactPerception: surfaceQuery is required");
-    }
-    if (!skinnedMesh.isSkinnedMesh) {
+
+    if (!skinnedMesh?.isSkinnedMesh) {
       throw new TypeError(
         "ContactPerception: skinnedMesh must be THREE.SkinnedMesh"
       );
     }
+
+    if (!surfaceQuery?.queryDown) {
+      throw new TypeError(
+        "ContactPerception: SurfaceQuery.queryDown is required"
+      );
+    }
+
     const defaults = ContactPerception.DEFAULT_CONFIG;
+
     this.root = root;
     this.skeleton = skeleton;
     this.skinnedMesh = skinnedMesh;
     this.surfaceQuery = surfaceQuery;
-    this.footInfluenceMin = Number.isFinite(footInfluenceMin)
-      ? footInfluenceMin
-      : defaults.footInfluenceMin;
-    this.shinInfluenceMax = Number.isFinite(shinInfluenceMax)
-      ? shinInfluenceMax
-      : defaults.shinInfluenceMax;
-    this.targetProbes = Number.isFinite(targetProbes)
-      ? Math.max(3, Math.min(8, Math.floor(targetProbes)))
-      : defaults.targetProbes;
-    this.contactSeparation = Number.isFinite(contactSeparation)
-      ? Math.max(0.001, contactSeparation)
-      : defaults.contactSeparation;
-    this.queryMaxDistance = Number.isFinite(queryMaxDistance)
-      ? Math.max(this.contactSeparation, queryMaxDistance)
-      : Math.max(
-          this.contactSeparation,
-          defaults.queryMaxDistance
-        );
-    this.minConfidence = Number.isFinite(minConfidence)
-      ? Math.max(0, Math.min(1, minConfidence))
-      : defaults.minConfidence;
-    this.clusterY = Number.isFinite(clusterY)
-      ? Math.max(0.001, clusterY)
-      : defaults.clusterY;
-    this.normalMinY = Number.isFinite(normalMinY)
-      ? Math.max(-1, Math.min(1, normalMinY))
-      : defaults.normalMinY;
-    this.maxFootSpan = Number.isFinite(maxFootSpan)
-      ? Math.max(0.01, maxFootSpan)
-      : defaults.maxFootSpan;
+
+    this.footInfluenceMin = this._number(
+      footInfluenceMin,
+      defaults.footInfluenceMin,
+      0,
+      1
+    );
+
+    this.shinInfluenceMax = this._number(
+      shinInfluenceMax,
+      defaults.shinInfluenceMax,
+      0,
+      1
+    );
+
+    this.targetProbes = Math.round(
+      this._number(
+        targetProbes,
+        defaults.targetProbes,
+        3,
+        8
+      )
+    );
+
+    this.clusterY = this._number(
+      clusterY,
+      defaults.clusterY,
+      0.001,
+      1
+    );
+
+    this.maxFootSpan = this._number(
+      maxFootSpan,
+      defaults.maxFootSpan,
+      0.01,
+      2
+    );
+
+    this.heightThreshold = this._number(
+      heightThreshold,
+      defaults.heightThreshold,
+      0.001,
+      0.5
+    );
+
+    this.velocityThreshold = this._number(
+      velocityThreshold,
+      defaults.velocityThreshold,
+      0.001,
+      10
+    );
+
+    this.voteFrames = Math.round(
+      this._number(
+        voteFrames,
+        defaults.voteFrames,
+        3,
+        9
+      )
+    );
+
+    /*
+     * Backward compatibility:
+     * main.js still passes contactSeparation.
+     *
+     * Keep penetration tolerance separate from the
+     * contact-height threshold. A foot can be 5.4 cm
+     * above the ground and still be a valid contact
+     * candidate under the reference 8 cm threshold.
+     */
+    this.maxPenetration = this._number(
+      maxPenetration,
+      Number.isFinite(contactSeparation)
+        ? contactSeparation
+        : defaults.maxPenetration,
+      0.001,
+      0.25
+    );
+
+    this.queryMaxDistance = this._number(
+      queryMaxDistance,
+      defaults.queryMaxDistance,
+      this.heightThreshold,
+      2
+    );
+
+    this.minConfidence = this._number(
+      minConfidence,
+      defaults.minConfidence,
+      0,
+      1
+    );
+
+    this.normalMinY = this._number(
+      normalMinY,
+      defaults.normalMinY,
+      -1,
+      1
+    );
+
+    this.fallbackDeltaTime = this._number(
+      fallbackDeltaTime,
+      defaults.fallbackDeltaTime,
+      1 / 1000,
+      0.25
+    );
+
     this._initialized = false;
+    this._lastUpdateTime = null;
+
     this._probeSets = new Map();
-    this._probeSets.set(
-      "foot_L",
-      this._createProbeSet("foot_L", "L")
-    );
-    this._probeSets.set(
-      "foot_R",
-      this._createProbeSet("foot_R", "R")
-    );
+    this._probeSets.set("foot_L", this._createProbeSet("foot_L", "L"));
+    this._probeSets.set("foot_R", this._createProbeSet("foot_R", "R"));
+
     this._evidence = {
       left: this._createEvidence("foot_L", "L"),
       right: this._createEvidence("foot_R", "R"),
     };
-    this._vertexLocal = new THREE.Vector3();
-    this._vertexWorld = new THREE.Vector3();
-    this._clusterCenter = new THREE.Vector3();
-    this._worldOrigin = new THREE.Vector3();
+
     this._queryResult = {
       valid: false,
       point: new THREE.Vector3(),
       normal: new THREE.Vector3(0, 1, 0),
-      separation: 0,
+      separation: Infinity,
       distance: Infinity,
       surfaceId: null,
       surfaceType: null,
@@ -125,189 +230,20 @@ export class ContactPerception {
       origin: new THREE.Vector3(),
       direction: new THREE.Vector3(0, -1, 0),
     };
-    this._probeHitsL = new Uint8Array(8);
-    this._probeHitsR = new Uint8Array(8);
-    this._probeSeparationsL = new Float32Array(8);
-    this._probeSeparationsR = new Float32Array(8);
-    this._probeSurfaceKeysL = new Array(8);
-    this._probeSurfaceKeysR = new Array(8);
-    // Fixed-size diagnostic scratch; no per-frame allocations.
-    this._rejectReasons = new Array(8);
-    this._lastDistances = new Float32Array(8);
-    this._queryValidFlags = new Uint8Array(8);
-    // bit 0 = left foot, bit 1 = right foot.
-    this._probeDumpMask = 0;
-    this._lastUpdateTime = 0;
-  }
-  initialize() {
-    // Keep transforms and skinning data synchronized before sampling.
-    this.root.updateMatrixWorld(true);
-    this.skeleton.update();
-    this.skinnedMesh.updateMatrixWorld(true);
 
-    this._probeSets.get("foot_L").reset();
-    this._probeSets.get("foot_R").reset();
-    const geometry = this.skinnedMesh.geometry;
-    if (!geometry) {
-      throw new Error(
-        "ContactPerception.initialize: skinnedMesh.geometry missing"
-      );
-    }
-    const position = geometry.getAttribute("position");
-    const skinIndex = geometry.getAttribute("skinIndex");
-    const skinWeight = geometry.getAttribute("skinWeight");
-    if (!position) {
-      throw new Error(
-        "ContactPerception.initialize: position attribute missing"
-      );
-    }
-    if (!skinIndex || !skinWeight) {
-      throw new Error(
-        "ContactPerception.initialize: skinIndex/skinWeight attributes missing"
-      );
-    }
-    const leftFootIndex = this._findBoneIndex(BONE_MAP.foot_L);
-    const rightFootIndex = this._findBoneIndex(BONE_MAP.foot_R);
-    const leftToeIndex = this._findBoneIndex(BONE_MAP.toe_L);
-    const rightToeIndex = this._findBoneIndex(BONE_MAP.toe_R);
-    const leftShinIndex = this._findBoneIndex(BONE_MAP.shin_L);
-    const rightShinIndex = this._findBoneIndex(BONE_MAP.shin_R);
-    if (leftFootIndex < 0 || rightFootIndex < 0) {
-      throw new Error(
-        "ContactPerception.initialize: required foot bones missing"
-      );
-    }
-    const vertexCount = position.count;
-    const leftCandidates = [];
-    const rightCandidates = [];
-    const vertex = new THREE.Vector3();
-    for (let i = 0; i < vertexCount; i++) {
-      const indices = this._readSkinIndices(skinIndex, i);
-      const weights = this._readSkinWeights(skinWeight, i);
-      const leftScore = this._footVertexScore(
-        indices,
-        weights,
-        leftFootIndex,
-        leftToeIndex,
-        leftShinIndex
-      );
-      const rightScore = this._footVertexScore(
-        indices,
-        weights,
-        rightFootIndex,
-        rightToeIndex,
-        rightShinIndex
-      );
-      if (leftScore > 0) {
-        this.skinnedMesh.getVertexPosition(i, vertex);
-        vertex.applyMatrix4(this.skinnedMesh.matrixWorld);
-        leftCandidates.push({
-          index: i,
-          x: vertex.x,
-          y: vertex.y,
-          z: vertex.z,
-          score: leftScore,
-        });
-      }
-      if (rightScore > 0) {
-        this.skinnedMesh.getVertexPosition(i, vertex);
-        vertex.applyMatrix4(this.skinnedMesh.matrixWorld);
-        rightCandidates.push({
-          index: i,
-          x: vertex.x,
-          y: vertex.y,
-          z: vertex.z,
-          score: rightScore,
-        });
-      }
-    }
-    this._buildProbeSet(
-      this._probeSets.get("foot_L"),
-      leftCandidates
-    );
-    this._buildProbeSet(
-      this._probeSets.get("foot_R"),
-      rightCandidates
-    );
-    this._initialized = true;
-    return this;
+    this._vertexLocal = new THREE.Vector3();
+    this._vertexWorld = new THREE.Vector3();
+
+    this._skinIndexScratch = [0, 0, 0, 0];
+    this._skinWeightScratch = [0, 0, 0, 0];
   }
-  update(time = 0) {
-    if (!this._initialized) {
-      this.initialize();
-    }
-    this._lastUpdateTime = time;
-    this._measureProbeSet(
-      this._probeSets.get("foot_L"),
-      this._evidence.left,
-      this._probeHitsL,
-      this._probeSeparationsL,
-      this._probeSurfaceKeysL
-    );
-    this._measureProbeSet(
-      this._probeSets.get("foot_R"),
-      this._evidence.right,
-      this._probeHitsR,
-      this._probeSeparationsR,
-      this._probeSurfaceKeysR
-    );
-    return this._evidence;
+
+  _number(value, fallback, min, max) {
+    const number = Number.isFinite(value) ? value : fallback;
+    return Math.max(min, Math.min(max, number));
   }
-  getEvidence(logicalBone = null) {
-    if (logicalBone === "foot_L") {
-      return this._evidence.left;
-    }
-    if (logicalBone === "foot_R") {
-      return this._evidence.right;
-    }
-    return this._evidence;
-  }
-  isInitialized() {
-    return this._initialized;
-  }
-  getProbeCount(logicalBone) {
-    const set = this._probeSets.get(logicalBone);
-    return set ? set.count : 0;
-  }
-  _findBoneIndex(name) {
-    const bones = this.skeleton.bones;
-    for (let i = 0; i < bones.length; i++) {
-      if (bones[i] && bones[i].name === name) {
-        return i;
-      }
-    }
-    return -1;
-  }
-  _createProbeSet(logicalBone, side) {
-    const samples = [];
-    for (let i = 0; i < this.targetProbes; i++) {
-      samples.push(new THREE.Vector3());
-    }
-    return {
-      logicalBone,
-      side,
-      count: 0,
-      vertices: new Uint32Array(64),
-      vertexCount: 0,
-      sampleVertices: new Uint32Array(8),
-      samples,
-      minY: Infinity,
-      maxY: -Infinity,
-      reset() {
-        this.count = 0;
-        this.vertexCount = 0;
-        this.minY = Infinity;
-        this.maxY = -Infinity;
-        this.vertices.fill(0);
-        this.sampleVertices.fill(0);
-        for (let i = 0; i < this.samples.length; i++) {
-          this.samples[i].set(0, 0, 0);
-        }
-        return this;
-      },
-    };
-  }
-  _createEvidence(logicalBone, side) {
+
+  _createEvidence(bone, side) {
     return {
       valid: false,
       point: new THREE.Vector3(),
@@ -320,145 +256,397 @@ export class ContactPerception {
       validProbeCount: 0,
       nearProbeCount: 0,
       probeAgreement: 0,
-      bone: logicalBone,
+      bone,
       side,
       backend: null,
       timestamp: 0,
+
+      // Additional diagnostics; existing consumers may ignore these.
+      averageSpeed: Infinity,
+      heightRatio: 0,
+      velocityRatio: 0,
+      voteRatio: 0,
+      rawContact: false,
+      temporalContact: false,
     };
   }
-  _readSkinIndices(attribute, index) {
-    const itemSize = attribute.itemSize;
-    const offset = index * itemSize;
-    const array = attribute.array;
-    return [
-      array[offset] || 0,
-      itemSize > 1 ? array[offset + 1] || 0 : 0,
-      itemSize > 2 ? array[offset + 2] || 0 : 0,
-      itemSize > 3 ? array[offset + 3] || 0 : 0,
-    ];
+
+  _createProbeSet(logicalBone, side) {
+    return {
+      logicalBone,
+      side,
+      count: 0,
+      sampleVertices: new Uint32Array(8),
+      samples: Array.from(
+        { length: 8 },
+        () => new THREE.Vector3()
+      ),
+      previousSamples: Array.from(
+        { length: 8 },
+        () => new THREE.Vector3()
+      ),
+      sampleSpeeds: new Float32Array(8),
+      sampleHasPrevious: new Uint8Array(8),
+
+      votes: new Uint8Array(this.voteFrames),
+      voteCount: 0,
+      voteCursor: 0,
+      positiveVotes: 0,
+      wasTemporallyContacting: false,
+    };
   }
-  _readSkinWeights(attribute, index) {
-    const itemSize = attribute.itemSize;
-    const offset = index * itemSize;
-    const array = attribute.array;
-    return [
-      array[offset] || 0,
-      itemSize > 1 ? array[offset + 1] || 0 : 0,
-      itemSize > 2 ? array[offset + 2] || 0 : 0,
-      itemSize > 3 ? array[offset + 3] || 0 : 0,
-    ];
+
+  initialize() {
+    this.root.updateMatrixWorld(true);
+    this.skeleton.update();
+    this.skinnedMesh.updateMatrixWorld(true);
+
+    const geometry = this.skinnedMesh.geometry;
+    const position = geometry?.getAttribute("position");
+    const skinIndex = geometry?.getAttribute("skinIndex");
+    const skinWeight = geometry?.getAttribute("skinWeight");
+
+    if (!position || !skinIndex || !skinWeight) {
+      throw new Error(
+        "ContactPerception.initialize: position, skinIndex and skinWeight are required"
+      );
+    }
+
+    const indices = {
+      footL: this._findBoneIndex(BONE_MAP.foot_L),
+      footR: this._findBoneIndex(BONE_MAP.foot_R),
+      toeL: this._findBoneIndex(BONE_MAP.toe_L),
+      toeR: this._findBoneIndex(BONE_MAP.toe_R),
+      shinL: this._findBoneIndex(BONE_MAP.shin_L),
+      shinR: this._findBoneIndex(BONE_MAP.shin_R),
+    };
+
+    if (indices.footL < 0 || indices.footR < 0) {
+      throw new Error(
+        "ContactPerception.initialize: canonical foot bones not found"
+      );
+    }
+
+    const candidatesL = [];
+    const candidatesR = [];
+
+    for (let i = 0; i < position.count; i++) {
+      this._readAttribute4(skinIndex, i, this._skinIndexScratch);
+      this._readAttribute4(skinWeight, i, this._skinWeightScratch);
+
+      const leftScore = this._footVertexScore(
+        this._skinIndexScratch,
+        this._skinWeightScratch,
+        indices.footL,
+        indices.toeL,
+        indices.shinL
+      );
+
+      const rightScore = this._footVertexScore(
+        this._skinIndexScratch,
+        this._skinWeightScratch,
+        indices.footR,
+        indices.toeR,
+        indices.shinR
+      );
+
+      if (leftScore > 0) {
+        this._readWorldVertex(i, this._vertexWorld);
+        candidatesL.push({
+          index: i,
+          x: this._vertexWorld.x,
+          y: this._vertexWorld.y,
+          z: this._vertexWorld.z,
+          score: leftScore,
+        });
+      }
+
+      if (rightScore > 0) {
+        this._readWorldVertex(i, this._vertexWorld);
+        candidatesR.push({
+          index: i,
+          x: this._vertexWorld.x,
+          y: this._vertexWorld.y,
+          z: this._vertexWorld.z,
+          score: rightScore,
+        });
+      }
+    }
+
+    this._buildProbeSet(
+      this._probeSets.get("foot_L"),
+      candidatesL
+    );
+
+    this._buildProbeSet(
+      this._probeSets.get("foot_R"),
+      candidatesR
+    );
+
+    for (const set of this._probeSets.values()) {
+      if (set.count < 3) {
+        console.warn(
+          `[AstraWay] ContactPerception: ${set.logicalBone} has only ${set.count} probes`
+        );
+      }
+    }
+
+    this._initialized = true;
+    return this;
   }
-  _footVertexScore(
-    indices,
-    weights,
-    footIndex,
-    toeIndex,
-    shinIndex
-  ) {
+
+  update(time = 0) {
+    if (!this._initialized) {
+      this.initialize();
+    }
+
+    const dt = this._getDeltaTime(time);
+    this._lastUpdateTime = Number.isFinite(time) ? time : 0;
+
+    this._measureProbeSet(
+      this._probeSets.get("foot_L"),
+      this._evidence.left,
+      dt
+    );
+
+    this._measureProbeSet(
+      this._probeSets.get("foot_R"),
+      this._evidence.right,
+      dt
+    );
+
+    return this._evidence;
+  }
+
+  _getDeltaTime(time) {
+    if (
+      Number.isFinite(time) &&
+      Number.isFinite(this._lastUpdateTime) &&
+      this._lastUpdateTime !== null
+    ) {
+      const delta = time - this._lastUpdateTime;
+
+      if (delta > 0.0001 && delta <= 0.25) {
+        return delta;
+      }
+    }
+
+    return this.fallbackDeltaTime;
+  }
+
+  getEvidence(logicalBone = null) {
+    if (logicalBone === "foot_L") {
+      return this._evidence.left;
+    }
+
+    if (logicalBone === "foot_R") {
+      return this._evidence.right;
+    }
+
+    return this._evidence;
+  }
+
+  getProbeCount(logicalBone) {
+    return this._probeSets.get(logicalBone)?.count ?? 0;
+  }
+
+  isInitialized() {
+    return this._initialized;
+  }
+
+  _findBoneIndex(name) {
+    if (!name) {
+      return -1;
+    }
+
+    const bones = this.skeleton.bones;
+
+    for (let i = 0; i < bones.length; i++) {
+      if (bones[i]?.name === name) {
+        return i;
+      }
+    }
+
+    return -1;
+  }
+
+  _readAttribute4(attribute, index, out) {
+    const offset = index * attribute.itemSize;
+    const array = attribute.array;
+
+    for (let i = 0; i < 4; i++) {
+      out[i] = i < attribute.itemSize
+        ? (array[offset + i] || 0)
+        : 0;
+    }
+
+    return out;
+  }
+
+  _footVertexScore(indices, weights, footIndex, toeIndex, shinIndex) {
     let footWeight = 0;
     let toeWeight = 0;
     let shinWeight = 0;
+
     for (let i = 0; i < 4; i++) {
-      const bone = indices[i];
-      const weight = weights[i];
-      if (bone === footIndex) {
-        footWeight += weight;
+      if (indices[i] === footIndex) {
+        footWeight += weights[i];
       }
-      if (bone === toeIndex) {
-        toeWeight += weight;
+
+      if (toeIndex >= 0 && indices[i] === toeIndex) {
+        toeWeight += weights[i];
       }
-      if (bone === shinIndex) {
-        shinWeight += weight;
+
+      if (shinIndex >= 0 && indices[i] === shinIndex) {
+        shinWeight += weights[i];
       }
     }
+
     const footScore = Math.max(footWeight, toeWeight);
+
     if (footScore < this.footInfluenceMin) {
       return 0;
     }
+
     if (shinWeight > this.shinInfluenceMax) {
       return 0;
     }
+
     return footScore;
   }
+
+  _readWorldVertex(vertexIndex, out) {
+    /*
+     * Keep the transform chain fresh before reading a deformed vertex.
+     * getVertexPosition() applies skinning; matrixWorld then maps the
+     * skinned mesh-local point into world space.
+     */
+    this.skinnedMesh.getVertexPosition(vertexIndex, this._vertexLocal);
+    out.copy(this._vertexLocal);
+    out.applyMatrix4(this.skinnedMesh.matrixWorld);
+    return out;
+  }
+
   _buildProbeSet(set, candidates) {
+    set.count = 0;
+
     if (!candidates.length) {
-      set.count = 0;
-      set.vertexCount = 0;
       return;
     }
-    let minY = Infinity;
-    for (let i = 0; i < candidates.length; i++) {
-      if (candidates[i].y < minY) {
-        minY = candidates[i].y;
+
+    let lowestY = Infinity;
+
+    for (const candidate of candidates) {
+      if (candidate.y < lowestY) {
+        lowestY = candidate.y;
       }
     }
-    set.minY = minY;
-    const clusterMaxY = minY + this.clusterY;
-    const cluster = [];
-    for (let i = 0; i < candidates.length; i++) {
-      const candidate = candidates[i];
-      if (candidate.y <= clusterMaxY) {
-        cluster.push(candidate);
-      }
-    }
+
+    const cluster = candidates.filter(
+      (candidate) => candidate.y <= lowestY + this.clusterY
+    );
+
     if (!cluster.length) {
-      set.count = 0;
-      set.vertexCount = 0;
       return;
     }
-    const retainedCount = Math.min(64, cluster.length);
-    set.vertexCount = retainedCount;
-    for (let i = 0; i < retainedCount; i++) {
-      set.vertices[i] = cluster[i].index;
-    }
+
+    /*
+     * Keep probes spatially separated so one tiny triangle or one
+     * isolated vertex cannot represent the entire foot.
+     */
+    const selected = [];
     let first = cluster[0];
-    for (let i = 1; i < cluster.length; i++) {
-      if (cluster[i].y < first.y) {
-        first = cluster[i];
+
+    for (const candidate of cluster) {
+      if (candidate.y < first.y) {
+        first = candidate;
       }
     }
-    set.samples[0].set(first.x, first.y, first.z);
-    set.sampleVertices[0] = first.index;
-    let selected = 1;
+
+    selected.push(first);
+
     while (
-      selected < this.targetProbes &&
-      selected < cluster.length
+      selected.length < this.targetProbes &&
+      selected.length < cluster.length
     ) {
       let best = null;
       let bestDistance = -1;
-      for (let i = 0; i < cluster.length; i++) {
-        const candidate = cluster[i];
+
+      for (const candidate of cluster) {
+        let alreadySelected = false;
+
+        for (const chosen of selected) {
+          if (candidate.index === chosen.index) {
+            alreadySelected = true;
+            break;
+          }
+        }
+
+        if (alreadySelected) {
+          continue;
+        }
+
         let nearestSq = Infinity;
-        for (let j = 0; j < selected; j++) {
-          const probe = set.samples[j];
-          const dx = candidate.x - probe.x;
-          const dz = candidate.z - probe.z;
-          const distanceSq = dx * dx + dz * dz;
+
+        for (const chosen of selected) {
+          const dx = candidate.x - chosen.x;
+          const dz = candidate.z - chosen.z;
+          const dy = candidate.y - chosen.y;
+
+          const distanceSq = dx * dx + dz * dz + dy * dy * 0.25;
+
           if (distanceSq < nearestSq) {
             nearestSq = distanceSq;
           }
         }
+
         if (nearestSq > bestDistance) {
           bestDistance = nearestSq;
           best = candidate;
         }
       }
+
       if (!best) {
         break;
       }
-      set.samples[selected].set(best.x, best.y, best.z);
-      set.sampleVertices[selected] = best.index;
-      selected++;
+
+      selected.push(best);
     }
-    set.count = selected;
+
+    /*
+     * If the lowest cluster is too small, use additional foot-influenced
+     * candidates, but prefer nearby low vertices over shin-like vertices.
+     */
+    if (selected.length < Math.min(3, this.targetProbes)) {
+      const extras = candidates
+        .filter((candidate) => candidate.y <= lowestY + this.clusterY * 2)
+        .sort((a, b) => a.y - b.y);
+
+      for (const candidate of extras) {
+        if (selected.length >= this.targetProbes) {
+          break;
+        }
+
+        if (!selected.some((item) => item.index === candidate.index)) {
+          selected.push(candidate);
+        }
+      }
+    }
+
+    set.count = Math.min(selected.length, this.targetProbes);
+
+    for (let i = 0; i < set.count; i++) {
+      const candidate = selected[i];
+
+      set.sampleVertices[i] = candidate.index;
+      set.samples[i].set(candidate.x, candidate.y, candidate.z);
+      set.previousSamples[i].copy(set.samples[i]);
+      set.sampleHasPrevious[i] = 0;
+      set.sampleSpeeds[i] = Infinity;
+    }
   }
-  _measureProbeSet(
-    set,
-    evidence,
-    hits,
-    separations,
-    surfaceKeys
-  ) {
+
+  _resetEvidence(evidence, set) {
     evidence.valid = false;
     evidence.point.set(0, 0, 0);
     evidence.normal.set(0, 1, 0);
@@ -471,384 +659,296 @@ export class ContactPerception {
     evidence.nearProbeCount = 0;
     evidence.probeAgreement = 0;
     evidence.backend = null;
-    evidence.timestamp = this._lastUpdateTime;
+    evidence.timestamp = this._lastUpdateTime ?? 0;
+    evidence.averageSpeed = Infinity;
+    evidence.heightRatio = 0;
+    evidence.velocityRatio = 0;
+    evidence.voteRatio = 0;
+    evidence.rawContact = false;
+    evidence.temporalContact = false;
+  }
+
+  _measureProbeSet(set, evidence, dt) {
+    this._resetEvidence(evidence, set);
+
+    if (set.count === 0) {
+      this._pushVote(set, false);
+      return;
+    }
+
+    /*
+     * Update world transforms once before sampling all probes.
+     */
+    this.root.updateMatrixWorld(true);
+    this.skeleton.update();
+    this.skinnedMesh.updateMatrixWorld(true);
+
     let validCount = 0;
     let nearCount = 0;
+    let slowCount = 0;
+
     let minSeparation = Infinity;
     let maxSeparation = -Infinity;
+    let totalSpeed = 0;
+
     let pointX = 0;
     let pointY = 0;
     let pointZ = 0;
     let normalX = 0;
     let normalY = 0;
     let normalZ = 0;
-    let bestProbeIndex = -1;
-    let bestAbsSeparation = Infinity;
-    if (!set.count) {
-      this._dumpProbeSetOnce(
-        set,
-        hits,
-        separations,
-        0,
-        0,
-        Infinity
-      );
-      return;
-    }
 
-    // Critical synchronization: update bone world transforms first,
-    // then refresh the bone matrices consumed by SkinnedMesh skinning.
-    this.root.updateMatrixWorld(true);
-    this.skeleton.update();
-    this.skinnedMesh.updateMatrixWorld(true);
+    let surfaceId = null;
+    let surfaceType = null;
+    let backend = null;
+    let matchingSurfaceCount = 0;
 
     for (let i = 0; i < set.count; i++) {
       const vertexIndex = set.sampleVertices[i];
-      this.skinnedMesh.getVertexPosition(
-        vertexIndex,
-        this._vertexLocal
-      );
-      this._vertexWorld.copy(this._vertexLocal);
-      this._vertexWorld.applyMatrix4(this.skinnedMesh.matrixWorld);
-      set.samples[i].copy(this._vertexWorld);
-    }
-    for (let i = 0; i < set.count; i++) {
-      const probe = set.samples[i];
+
+      this._readWorldVertex(vertexIndex, this._vertexWorld);
+
+      const sample = set.samples[i];
+      const previous = set.previousSamples[i];
+
+      sample.copy(this._vertexWorld);
+
+      let speed = Infinity;
+
+      if (set.sampleHasPrevious[i] && dt > 0) {
+        speed = sample.distanceTo(previous) / dt;
+      }
+
+      set.sampleSpeeds[i] = speed;
+
+      previous.copy(sample);
+      set.sampleHasPrevious[i] = 1;
+
       const result = this.surfaceQuery.queryDown({
-        origin: probe,
+        origin: sample,
         maxDistance: this.queryMaxDistance,
         out: this._queryResult,
       });
-      const queryValid = result.valid === true;
-      this._queryValidFlags[i] = queryValid ? 1 : 0;
-      this._lastDistances[i] = Number.isFinite(result.distance)
-        ? result.distance
-        : Infinity;
-      if (!queryValid) {
-        hits[i] = 0;
-        separations[i] = Infinity;
-        surfaceKeys[i] = null;
-        this._rejectReasons[i] =
-          this._inferInvalidQueryReason(probe);
-        continue;
-      }
-      const separation = result.separation;
-      if (separation < -this.contactSeparation) {
-        hits[i] = 0;
-        separations[i] = separation;
-        surfaceKeys[i] = null;
-        this._rejectReasons[i] = "deep_penetration";
-        continue;
-      }
-      hits[i] = 1;
-      separations[i] = separation;
-      surfaceKeys[i] = this._surfaceKey(
-        result.surfaceId,
-        result.surfaceType
-      );
-      this._rejectReasons[i] = "accepted";
-      validCount++;
-      if (separation <= this.contactSeparation) {
-        nearCount++;
-      }
-      if (separation < minSeparation) {
-        minSeparation = separation;
-      }
-      if (separation > maxSeparation) {
-        maxSeparation = separation;
-      }
-      pointX += result.point.x;
-      pointY += result.point.y;
-      pointZ += result.point.z;
-      normalX += result.normal.x;
-      normalY += result.normal.y;
-      normalZ += result.normal.z;
-      const absSeparation = Math.abs(separation);
-      if (absSeparation < bestAbsSeparation) {
-        bestAbsSeparation = absSeparation;
-        bestProbeIndex = i;
-      }
-    }
-    evidence.nearProbeCount = nearCount;
-    evidence.validProbeCount = validCount;
-    evidence.separation = minSeparation;
-    this._dumpProbeSetOnce(
-      set,
-      hits,
-      separations,
-      validCount,
-      nearCount,
-      minSeparation
-    );
-    if (!validCount) {
-      return;
-    }
-    if (nearCount < 2) {
-      return;
-    }
-    const majorityIndex = this._majoritySurfaceIndex(
-      surfaceKeys,
-      set.count,
-      hits
-    );
-    let majorityVotes = 0;
-    if (majorityIndex >= 0) {
-      majorityVotes = this._countSurfaceVotes(
-        surfaceKeys,
-        set.count,
-        hits,
-        surfaceKeys[majorityIndex]
-      );
-    }
-    const majorityRatio = validCount > 0
-      ? majorityVotes / validCount
-      : 0;
-    const nearRatio = nearCount / set.count;
-    const spread = Math.max(
-      0,
-      maxSeparation - minSeparation
-    );
-    const separationConsistency = Math.max(
-      0,
-      1 -
-        spread /
-          Math.max(this.contactSeparation * 2, 1e-6)
-    );
-    const confidence =
-      nearRatio *
-      separationConsistency *
-      majorityRatio;
-    evidence.confidence = Math.max(
-      0,
-      Math.min(1, confidence)
-    );
-    evidence.probeAgreement =
-      nearRatio * 0.6 +
-      separationConsistency * 0.4;
-    let contactCount = 0;
-    let contactX = 0;
-    let contactY = 0;
-    let contactZ = 0;
-    let contactNormalX = 0;
-    let contactNormalY = 0;
-    let contactNormalZ = 0;
-    for (let i = 0; i < set.count; i++) {
-      if (!hits[i]) {
-        continue;
-      }
-      if (separations[i] > this.contactSeparation) {
-        continue;
-      }
-      const probe = set.samples[i];
-      const result = this.surfaceQuery.queryDown({
-        origin: probe,
-        maxDistance: this.queryMaxDistance,
-        out: this._queryResult,
-      });
+
       if (!result.valid) {
         continue;
       }
-      contactX += result.point.x;
-      contactY += result.point.y;
-      contactZ += result.point.z;
-      contactNormalX += result.normal.x;
-      contactNormalY += result.normal.y;
-      contactNormalZ += result.normal.z;
-      contactCount++;
-    }
-    if (contactCount > 0) {
-      const inverse = 1 / contactCount;
-      evidence.point.set(
-        contactX * inverse,
-        contactY * inverse,
-        contactZ * inverse
-      );
-      evidence.normal.set(
-        contactNormalX * inverse,
-        contactNormalY * inverse,
-        contactNormalZ * inverse
-      );
-      if (evidence.normal.lengthSq() > 1e-8) {
-        evidence.normal.normalize();
+
+      const separation = result.separation;
+
+      /*
+       * A probe far below the surface is not valid contact evidence.
+       * Small numerical penetration is allowed.
+       */
+      if (separation < -this.maxPenetration) {
+        continue;
       }
-    } else if (bestProbeIndex >= 0) {
-      const probe = set.samples[bestProbeIndex];
-      const result = this.surfaceQuery.queryDown({
-        origin: probe,
-        maxDistance: this.queryMaxDistance,
-        out: this._queryResult,
-      });
-      if (result.valid) {
-        evidence.point.copy(result.point);
-        evidence.normal.copy(result.normal);
+
+      if (
+        !Number.isFinite(result.normal?.y) ||
+        result.normal.y < this.normalMinY
+      ) {
+        continue;
+      }
+
+      validCount++;
+
+      minSeparation = Math.min(minSeparation, separation);
+      maxSeparation = Math.max(maxSeparation, separation);
+
+      const near = (
+        separation >= -this.maxPenetration &&
+        separation <= this.heightThreshold
+      );
+
+      if (near) {
+        nearCount++;
+      }
+
+      /*
+       * On the first sample, velocity is unknown.
+       * It cannot confirm contact, but the sample is retained so the
+       * following frame can calculate a real world-space velocity.
+       */
+      if (
+        Number.isFinite(speed) &&
+        speed <= this.velocityThreshold
+      ) {
+        slowCount++;
+      }
+
+      totalSpeed += Number.isFinite(speed) ? speed : this.velocityThreshold * 2;
+
+      pointX += result.point.x;
+      pointY += result.point.y;
+      pointZ += result.point.z;
+
+      normalX += result.normal.x;
+      normalY += result.normal.y;
+      normalZ += result.normal.z;
+
+      if (surfaceId === null) {
+        surfaceId = result.surfaceId;
+        surfaceType = result.surfaceType;
+        backend = result.backend;
+        matchingSurfaceCount = 1;
+      } else if (
+        surfaceId === result.surfaceId &&
+        surfaceType === result.surfaceType
+      ) {
+        matchingSurfaceCount++;
       }
     }
+
+    evidence.validProbeCount = validCount;
+    evidence.nearProbeCount = nearCount;
     evidence.separation = minSeparation;
-    if (majorityIndex >= 0 && surfaceKeys[majorityIndex]) {
-      const key = surfaceKeys[majorityIndex];
-      const separator = key.indexOf("|");
-      if (separator >= 0) {
-        evidence.surfaceId = key.slice(0, separator);
-        evidence.surfaceType = key.slice(separator + 1);
-      } else {
-        evidence.surfaceId = key;
-        evidence.surfaceType = null;
-      }
-    }
-    evidence.backend = this._queryResult.backend;
-    evidence.valid =
-      evidence.confidence >= this.minConfidence &&
-      nearCount >= 2 &&
-      majorityRatio >= 0.5 &&
-      separationConsistency > 0;
-    if (
-      !Number.isFinite(evidence.point.x) ||
-      !Number.isFinite(evidence.point.y) ||
-      !Number.isFinite(evidence.point.z)
-    ) {
-      evidence.valid = false;
-    }
-  }
-  _inferInvalidQueryReason(probe) {
-    if (
-      !probe ||
-      !Number.isFinite(probe.x) ||
-      !Number.isFinite(probe.y) ||
-      !Number.isFinite(probe.z)
-    ) {
-      return "non_finite_origin";
-    }
-    const groundY = this.surfaceQuery.groundY;
-    const epsilon = Number.isFinite(this.surfaceQuery.epsilon)
-      ? this.surfaceQuery.epsilon
-      : 1e-6;
-    const verticalGap = probe.y - groundY;
-    if (verticalGap < -epsilon) {
-      return "below_plane_ray_behind";
-    }
-    if (verticalGap > this.queryMaxDistance + epsilon) {
-      return "above_maxDistance";
-    }
-    return "query_invalid_unknown";
-  }
-  _dumpProbeSetOnce(
-    set,
-    hits,
-    separations,
-    acceptedCount,
-    nearCount,
-    minSeparation
-  ) {
-    const bone = set && set.logicalBone
-      ? set.logicalBone
-      : "?";
-    let bit = 0;
-    if (bone === "foot_L" || (set && set.side === "L")) {
-      bit = 1;
-    } else if (bone === "foot_R" || (set && set.side === "R")) {
-      bit = 2;
-    } else {
-      bit = 1;
-    }
-    if ((this._probeDumpMask & bit) !== 0) {
+
+    if (validCount === 0) {
+      this._pushVote(set, false);
+      this._updateVoteDiagnostics(set, evidence);
       return;
     }
-    const minSepText = Number.isFinite(minSeparation)
-      ? minSeparation.toFixed(4)
-      : "INF";
-    console.log(
-      `[AstraWay:probeDump] bone=${bone} ` +
-      `groundY=${this.surfaceQuery.groundY} ` +
-      `queryMaxDistance=${this.queryMaxDistance} ` +
-      `contactSeparation=${this.contactSeparation} ` +
-      `probeCount=${set ? set.count : 0} ` +
-      `acceptedCount=${acceptedCount} ` +
-      `nearCount=${nearCount} ` +
-      `minSeparation=${minSepText}`
+
+    const nearRatio = nearCount / set.count;
+    const slowRatio = slowCount / set.count;
+    const surfaceRatio = matchingSurfaceCount / validCount;
+
+    const spread = Math.max(0, maxSeparation - minSeparation);
+
+    const separationConsistency = Math.max(
+      0,
+      1 - spread / Math.max(this.heightThreshold, EPSILON)
     );
-    if (!set || !set.count) {
-      console.log(
-        `${bone}[—] empty_probe_set queryValid=0 accepted=0 reason=empty_probe_set`
-      );
+
+    const rawContact = (
+      nearCount >= Math.min(2, set.count) &&
+      slowCount >= Math.min(2, set.count) &&
+      nearRatio >= 0.4 &&
+      slowRatio >= 0.4 &&
+      surfaceRatio >= 0.5
+    );
+
+    /*
+     * Temporal vote:
+     * - starting contact requires every available vote to be positive;
+     * - once contact evidence is established, a majority can retain it.
+     *
+     * This only stabilizes perception. ContactState still owns the
+     * authoritative NONE -> CANDIDATE -> ESTABLISHED -> PLANTED lifecycle.
+     */
+    this._pushVote(set, rawContact);
+
+    const yes = set.positiveVotes;
+    const voteRatio = set.voteCount > 0 ? yes / set.voteCount : 0;
+
+    const unanimous = (
+      set.voteCount >= this.voteFrames &&
+      yes === set.voteCount
+    );
+
+    const majority = (
+      set.voteCount >= this.voteFrames &&
+      yes > set.voteCount / 2
+    );
+
+    const temporalContact = set.wasTemporallyContacting
+      ? majority
+      : unanimous;
+
+    if (temporalContact) {
+      set.wasTemporallyContacting = true;
+    } else if (!majority && !unanimous) {
+      set.wasTemporallyContacting = false;
+    }
+
+    evidence.heightRatio = nearRatio;
+    evidence.velocityRatio = slowRatio;
+    evidence.voteRatio = voteRatio;
+    evidence.rawContact = rawContact;
+    evidence.temporalContact = temporalContact;
+    evidence.averageSpeed = totalSpeed / set.count;
+    evidence.probeAgreement = (
+      nearRatio * 0.4 +
+      slowRatio * 0.35 +
+      separationConsistency * 0.25
+    );
+
+    evidence.confidence = Math.max(
+      0,
+      Math.min(
+        1,
+        nearRatio *
+          slowRatio *
+          surfaceRatio *
+          separationConsistency *
+          voteRatio
+      )
+    );
+
+    evidence.surfaceId = surfaceId;
+    evidence.surfaceType = surfaceType;
+    evidence.backend = backend;
+
+    /*
+     * Use the average surface point of valid probes.
+     * These are world-space surface points, not bone positions.
+     */
+    const inverse = 1 / validCount;
+
+    evidence.point.set(
+      pointX * inverse,
+      pointY * inverse,
+      pointZ * inverse
+    );
+
+    evidence.normal.set(
+      normalX,
+      normalY,
+      normalZ
+    );
+
+    if (evidence.normal.lengthSq() > EPSILON) {
+      evidence.normal.normalize();
     } else {
-      for (let i = 0; i < set.count; i++) {
-        const point = set.samples[i];
-        const queryValid = this._queryValidFlags[i] ? 1 : 0;
-        const accepted = hits[i] ? 1 : 0;
-        const reason = accepted
-          ? "accepted"
-          : this._rejectReasons[i] || "unknown";
-        const distance = this._lastDistances[i];
-        const distanceText = Number.isFinite(distance)
-          ? distance.toFixed(4)
-          : "INF";
-        let separationText = "INF";
-        if (accepted || reason === "deep_penetration") {
-          separationText = Number.isFinite(separations[i])
-            ? separations[i].toFixed(4)
-            : "INF";
-        } else if (
-          point &&
-          Number.isFinite(point.y) &&
-          Number.isFinite(this.surfaceQuery.groundY)
-        ) {
-          separationText = (
-            point.y - this.surfaceQuery.groundY
-          ).toFixed(4);
-        }
-        console.log(
-          `${bone}[${i}] ` +
-          `xyz=(${point.x.toFixed(4)},${point.y.toFixed(4)},${point.z.toFixed(4)}) ` +
-          `queryValid=${queryValid} ` +
-          `accepted=${accepted} ` +
-          `dist=${distanceText} ` +
-          `sep=${separationText} ` +
-          `maxD=${this.queryMaxDistance} ` +
-          `reason=${reason}`
-        );
-      }
+      evidence.normal.set(0, 1, 0);
     }
-    this._probeDumpMask |= bit;
-  }
-  _surfaceKey(surfaceId, surfaceType) {
-    return (
-      String(surfaceId == null ? "" : surfaceId) +
-      "|" +
-      String(surfaceType == null ? "" : surfaceType)
+
+    evidence.valid = (
+      temporalContact &&
+      evidence.confidence >= this.minConfidence &&
+      nearCount >= Math.min(2, set.count) &&
+      Number.isFinite(evidence.point.x) &&
+      Number.isFinite(evidence.point.y) &&
+      Number.isFinite(evidence.point.z)
     );
+
+    this._updateVoteDiagnostics(set, evidence);
   }
-  _majoritySurfaceIndex(keys, count, hits) {
-    let bestIndex = -1;
-    let bestVotes = 0;
-    for (let i = 0; i < count; i++) {
-      if (!hits[i]) {
-        continue;
-      }
-      const key = keys[i];
-      if (key == null) {
-        continue;
-      }
-      let votes = 0;
-      for (let j = 0; j < count; j++) {
-        if (hits[j] && keys[j] === key) {
-          votes++;
-        }
-      }
-      if (votes > bestVotes) {
-        bestVotes = votes;
-        bestIndex = i;
-      }
+
+  _pushVote(set, value) {
+    const vote = value ? 1 : 0;
+
+    if (set.voteCount < this.voteFrames) {
+      set.votes[set.voteCursor] = vote;
+      set.positiveVotes += vote;
+      set.voteCount++;
+    } else {
+      set.positiveVotes -= set.votes[set.voteCursor];
+      set.votes[set.voteCursor] = vote;
+      set.positiveVotes += vote;
     }
-    return bestIndex;
+
+    set.voteCursor = (set.voteCursor + 1) % this.voteFrames;
   }
-  _countSurfaceVotes(keys, count, hits, key) {
-    let votes = 0;
-    for (let i = 0; i < count; i++) {
-      if (hits[i] && keys[i] === key) {
-        votes++;
-      }
-    }
-    return votes;
+
+  _updateVoteDiagnostics(set, evidence) {
+    evidence.voteRatio = set.voteCount > 0
+      ? set.positiveVotes / set.voteCount
+      : 0;
+
+    evidence.temporalContact = set.wasTemporallyContacting;
   }
 }
+
 export default ContactPerception;
