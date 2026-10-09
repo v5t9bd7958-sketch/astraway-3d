@@ -1,14 +1,20 @@
+// src/character/ContactPerception.js
 import * as THREE from "three";
 import { BONE_MAP } from "./BoneMap.js";
 
 const EPSILON = 1e-8;
 
+const SIDES = Object.freeze({
+  L: "L",
+  R: "R",
+});
+
 /*
- * AstraWay Character Core
+ * AstraWay Character Core — ContactPerception
  *
  * Responsibility:
  *   skinned geometry
- *     -> foot probes
+ *     -> foot probes (anchored to geometric sole)
  *     -> SurfaceQuery measurements
  *     -> contact evidence
  *     -> existing ContactState consumer
@@ -20,15 +26,18 @@ const EPSILON = 1e-8;
  *   - modify ContactState directly;
  *   - own a second animation pipeline.
  *
- * Important separation:
- *   validProbeCount = queryDown() results with valid === true.
- *   nearProbeCount  = valid measurements within contactDistance,
- *                     excluding excessive penetration.
- *   confidence      = nearProbeCount / probeCount.
- *   spread          = max separation - min separation.
+ * Probe selection:
+ *   1. Scan every vertex with any foot/toe influence.
+ *   2. Record geometric minimum Y per side (BEFORE weight thresholds).
+ *   3. Filter candidates within (footMinY + clusterY).
+ *   4. Apply weight thresholds (footInfluenceMin, shinInfluenceMax).
+ *   5. Choose spatially separated probes from the filtered cluster.
  *
- * Temporary diagnostic logging is enabled to identify
- * why valid foot probes are not becoming near-contact probes.
+ * Evidence semantics:
+ *   validProbeCount    = queryDown() returned valid === true.
+ *   acceptedProbeCount = passed penetration, normal, point checks.
+ *   nearProbeCount     = accepted probes within contactDistance.
+ *   confidence         = nearProbeCount / probeCount.
  */
 
 export class ContactPerception {
@@ -50,6 +59,7 @@ export class ContactPerception {
     normalMinY: 0.45,
 
     fallbackDeltaTime: 1 / 60,
+    debug: false,
   });
 
   constructor({
@@ -75,6 +85,7 @@ export class ContactPerception {
     normalMinY,
     maxPenetration,
     fallbackDeltaTime,
+    debug,
   } = {}) {
     if (!root) {
       throw new TypeError("ContactPerception: root is required");
@@ -147,10 +158,6 @@ export class ContactPerception {
       0.5
     );
 
-    /*
-     * Preserve the existing contact threshold.
-     * If main.js does not supply contactDistance, use heightThreshold.
-     */
     this.contactDistance = this._number(
       contactDistance,
       this.heightThreshold,
@@ -174,10 +181,6 @@ export class ContactPerception {
       )
     );
 
-    /*
-     * Backward compatibility with existing callers that pass
-     * contactSeparation instead of maxPenetration.
-     */
     this.maxPenetration = this._number(
       maxPenetration,
       Number.isFinite(contactSeparation)
@@ -215,24 +218,35 @@ export class ContactPerception {
       0.25
     );
 
+    this.debug = debug === true;
+
     this._initialized = false;
     this._lastUpdateTime = null;
 
     this._probeSets = new Map();
 
+    /*
+     * Geometric minimum Y per side, scanned BEFORE weight thresholds.
+     * This is the actual sole anchor used to build probes.
+     */
+    this._footMinY = {
+      [SIDES.L]: Infinity,
+      [SIDES.R]: Infinity,
+    };
+
     this._probeSets.set(
       "foot_L",
-      this._createProbeSet("foot_L", "L")
+      this._createProbeSet("foot_L", SIDES.L)
     );
 
     this._probeSets.set(
       "foot_R",
-      this._createProbeSet("foot_R", "R")
+      this._createProbeSet("foot_R", SIDES.R)
     );
 
     this._evidence = {
-      left: this._createEvidence("foot_L", "L"),
-      right: this._createEvidence("foot_R", "R"),
+      left: this._createEvidence("foot_L", SIDES.L),
+      right: this._createEvidence("foot_R", SIDES.R),
     };
 
     this._queryResult = {
@@ -289,7 +303,6 @@ export class ContactPerception {
       rawContact: false,
       temporalContact: false,
 
-      // Number of measurements passing penetration and normal checks.
       acceptedProbeCount: 0,
     };
   }
@@ -357,6 +370,9 @@ export class ContactPerception {
     const candidatesL = [];
     const candidatesR = [];
 
+    this._footMinY[SIDES.L] = Infinity;
+    this._footMinY[SIDES.R] = Infinity;
+
     for (let i = 0; i < position.count; i++) {
       this._readAttribute4(
         skinIndex,
@@ -370,7 +386,7 @@ export class ContactPerception {
         this._skinWeightScratch
       );
 
-      const leftScore = this._footVertexScore(
+      const left = this._footVertexWeights(
         this._skinIndexScratch,
         this._skinWeightScratch,
         indices.footL,
@@ -378,7 +394,7 @@ export class ContactPerception {
         indices.shinL
       );
 
-      const rightScore = this._footVertexScore(
+      const right = this._footVertexWeights(
         this._skinIndexScratch,
         this._skinWeightScratch,
         indices.footR,
@@ -386,28 +402,48 @@ export class ContactPerception {
         indices.shinR
       );
 
-      if (leftScore > 0) {
+      if (left.footScore > 0) {
         this._readWorldVertex(i, this._vertexWorld);
 
-        candidatesL.push({
+        const candidate = {
           index: i,
           x: this._vertexWorld.x,
           y: this._vertexWorld.y,
           z: this._vertexWorld.z,
-          score: leftScore,
-        });
+          footScore: left.footScore,
+          footWeight: left.footWeight,
+          toeWeight: left.toeWeight,
+          shinWeight: left.shinWeight,
+        };
+
+        candidatesL.push(candidate);
+
+        this._footMinY[SIDES.L] = Math.min(
+          this._footMinY[SIDES.L],
+          candidate.y
+        );
       }
 
-      if (rightScore > 0) {
+      if (right.footScore > 0) {
         this._readWorldVertex(i, this._vertexWorld);
 
-        candidatesR.push({
+        const candidate = {
           index: i,
           x: this._vertexWorld.x,
           y: this._vertexWorld.y,
           z: this._vertexWorld.z,
-          score: rightScore,
-        });
+          footScore: right.footScore,
+          footWeight: right.footWeight,
+          toeWeight: right.toeWeight,
+          shinWeight: right.shinWeight,
+        };
+
+        candidatesR.push(candidate);
+
+        this._footMinY[SIDES.R] = Math.min(
+          this._footMinY[SIDES.R],
+          candidate.y
+        );
       }
     }
 
@@ -428,6 +464,18 @@ export class ContactPerception {
         );
       }
     }
+
+    console.log(
+      "[AstraWay] ContactPerception initialize",
+      {
+        footMinY_L: this._footMinY[SIDES.L],
+        footMinY_R: this._footMinY[SIDES.R],
+        candidates_L: candidatesL.length,
+        candidates_R: candidatesR.length,
+        probes_L: this._probeSets.get("foot_L").count,
+        probes_R: this._probeSets.get("foot_R").count,
+      }
+    );
 
     this._initialized = true;
     return this;
@@ -492,6 +540,35 @@ export class ContactPerception {
     return this._initialized;
   }
 
+  getDiagnostics() {
+    return {
+      footMinY: {
+        L: this._footMinY[SIDES.L],
+        R: this._footMinY[SIDES.R],
+      },
+      probes: {
+        L: this._probeSets.get("foot_L").count,
+        R: this._probeSets.get("foot_R").count,
+      },
+      left: {
+        probeCount: this._evidence.left.probeCount,
+        validProbeCount: this._evidence.left.validProbeCount,
+        nearProbeCount: this._evidence.left.nearProbeCount,
+        spread: this._evidence.left.spread,
+        confidence: this._evidence.left.confidence,
+        separation: this._evidence.left.separation,
+      },
+      right: {
+        probeCount: this._evidence.right.probeCount,
+        validProbeCount: this._evidence.right.validProbeCount,
+        nearProbeCount: this._evidence.right.nearProbeCount,
+        spread: this._evidence.right.spread,
+        confidence: this._evidence.right.confidence,
+        separation: this._evidence.right.separation,
+      },
+    };
+  }
+
   _findBoneIndex(name) {
     if (!name) {
       return -1;
@@ -521,7 +598,7 @@ export class ContactPerception {
     return out;
   }
 
-  _footVertexScore(
+  _footVertexWeights(
     indices,
     weights,
     footIndex,
@@ -546,24 +623,15 @@ export class ContactPerception {
       }
     }
 
-    const footScore = Math.max(footWeight, toeWeight);
-
-    if (footScore < this.footInfluenceMin) {
-      return 0;
-    }
-
-    if (shinWeight > this.shinInfluenceMax) {
-      return 0;
-    }
-
-    return footScore;
+    return {
+      footWeight,
+      toeWeight,
+      shinWeight,
+      footScore: Math.max(footWeight, toeWeight),
+    };
   }
 
   _readWorldVertex(vertexIndex, out) {
-    /*
-     * getVertexPosition applies skinning.
-     * matrixWorld converts the skinned vertex into world space.
-     */
     this.skinnedMesh.getVertexPosition(
       vertexIndex,
       this._vertexLocal
@@ -582,16 +650,26 @@ export class ContactPerception {
       return;
     }
 
-    let lowestY = Infinity;
+    /*
+     * Anchor to the geometric sole scanned BEFORE weight filtering.
+     * This is the actual fix: the lowest foot vertex might have
+     * shinWeight above the threshold, but it still defines the sole.
+     */
+    const footMinY = this._footMinY[set.side];
 
-    for (const candidate of candidates) {
-      if (candidate.y < lowestY) {
-        lowestY = candidate.y;
-      }
+    if (!Number.isFinite(footMinY)) {
+      return;
     }
 
-    const cluster = candidates.filter(
-      (candidate) => candidate.y <= lowestY + this.clusterY
+    const lowFootCandidates = candidates.filter(
+      (candidate) =>
+        candidate.y <= footMinY + this.clusterY
+    );
+
+    const cluster = lowFootCandidates.filter(
+      (candidate) =>
+        candidate.footScore >= this.footInfluenceMin &&
+        candidate.shinWeight <= this.shinInfluenceMax
     );
 
     if (!cluster.length) {
@@ -609,10 +687,6 @@ export class ContactPerception {
 
     selected.push(first);
 
-    /*
-     * Choose spatially separated vertices to sample different
-     * regions of the foot instead of repeatedly sampling one triangle.
-     */
     while (
       selected.length < this.targetProbes &&
       selected.length < cluster.length
@@ -653,33 +727,6 @@ export class ContactPerception {
       }
 
       selected.push(best);
-    }
-
-    /*
-     * If the lowest cluster is too small, supplement it with
-     * additional low, foot-influenced vertices.
-     */
-    if (selected.length < Math.min(3, this.targetProbes)) {
-      const extras = candidates
-        .filter(
-          (candidate) =>
-            candidate.y <= lowestY + this.clusterY * 2
-        )
-        .sort((a, b) => a.y - b.y);
-
-      for (const candidate of extras) {
-        if (selected.length >= this.targetProbes) {
-          break;
-        }
-
-        if (
-          !selected.some(
-            (item) => item.index === candidate.index
-          )
-        ) {
-          selected.push(candidate);
-        }
-      }
     }
 
     set.count = Math.min(
@@ -802,11 +849,6 @@ export class ContactPerception {
         out: this._queryResult,
       });
 
-      /*
-       * Contract:
-       * validProbeCount counts every queryDown result marked valid.
-       * Do this before penetration and normal filtering.
-       */
       if (!result || result.valid !== true) {
         continue;
       }
@@ -815,29 +857,22 @@ export class ContactPerception {
 
       const separation = result.separation;
 
-      /*
-       * TEMPORARY DIAGNOSTIC:
-       * Print the raw separation and the exact near-contact decision.
-       * This does not change the contact calculation.
-       */
-      console.log("[AstraWay ContactProbe]", {
-        side: set.side,
-        probe: i,
-        separation: Number.isFinite(separation)
-          ? Number(separation.toFixed(4))
-          : separation,
-        contactDistance: this.contactDistance,
-        maxPenetration: this.maxPenetration,
-        near: Number.isFinite(separation)
-          && separation <= this.contactDistance,
-        rejectedByPenetration: Number.isFinite(separation)
-          && separation < -this.maxPenetration,
-      });
+      if (this.debug) {
+        console.log("[AstraWay ContactProbe]", {
+          side: set.side,
+          probe: i,
+          separation: Number.isFinite(separation)
+            ? Number(separation.toFixed(4))
+            : separation,
+          contactDistance: this.contactDistance,
+          maxPenetration: this.maxPenetration,
+          near: Number.isFinite(separation)
+            && separation <= this.contactDistance,
+          rejectedByPenetration: Number.isFinite(separation)
+            && separation < -this.maxPenetration,
+        });
+      }
 
-      /*
-       * Spread uses all valid, finite separation measurements.
-       * It is diagnostic only; it does not suppress contact.
-       */
       if (Number.isFinite(separation)) {
         minSeparation = Math.min(
           minSeparation,
@@ -850,10 +885,6 @@ export class ContactPerception {
         );
       }
 
-      /*
-       * A probe deeply below the surface is not near-contact evidence.
-       * This safety rule is independent of the confidence formula.
-       */
       if (!Number.isFinite(separation)) {
         continue;
       }
@@ -862,11 +893,6 @@ export class ContactPerception {
         continue;
       }
 
-      /*
-       * Count near probes after the penetration guard.
-       * The normal check remains a separate safety condition for
-       * accepted surface contact.
-       */
       const near = separation <= this.contactDistance;
 
       if (near) {
@@ -908,10 +934,6 @@ export class ContactPerception {
         pointY += result.point.y;
         pointZ += result.point.z;
       } else {
-        /*
-         * A valid contact candidate must still have a usable point.
-         * Do not include malformed points in the accepted surface sum.
-         */
         acceptedCount--;
 
         if (near) {
@@ -969,10 +991,6 @@ export class ContactPerception {
       evidence.spread = 0;
     }
 
-    /*
-     * No usable surface measurements: record a negative temporal vote
-     * and clear stale temporal contact.
-     */
     if (validCount === 0 || acceptedCount === 0) {
       this._pushVote(set, false);
       set.wasTemporallyContacting = false;
@@ -994,10 +1012,6 @@ export class ContactPerception {
     const slowRatio = slowCount / set.count;
     const surfaceRatio = matchingSurfaceCount / acceptedCount;
 
-    /*
-     * Keep existing temporal and surface-safety requirements.
-     * Confidence is NOT multiplied by these ratios.
-     */
     const rawContact = (
       acceptedNearCount >= Math.min(2, set.count) &&
       slowCount >= Math.min(2, set.count) &&
@@ -1062,11 +1076,6 @@ export class ContactPerception {
       evidence.normal.set(0, 1, 0);
     }
 
-    /*
-     * Preserve the established consumer contract:
-     * valid means temporally confirmed, sufficiently confident,
-     * supported by multiple near probes, and backed by finite geometry.
-     */
     evidence.valid = (
       temporalContact &&
       evidence.confidence >= this.minConfidence &&
