@@ -567,19 +567,13 @@ export class ContactPerception {
     const footMinY = this._footMinY[set.side];
     if (!Number.isFinite(footMinY)) return;
 
-    /*
-     * Y-filter only.
-     *
-     * _footMinY already selected every vertex with any foot/toe
-     * influence. The Y-filter narrows to the actual geometric sole.
-     *
-     * Weight thresholds are intentionally NOT applied here:
-     * they exclude the lowest sole vertices on Xbot, forcing probes
-     * to sit 15+ cm above the ground.
-     */
     const cluster = candidates.filter(
       (candidate) =>
         candidate.y <= footMinY + this.clusterY
+    );
+
+    console.log(
+      `[AstraWay:probeDump] buildProbeSet side=${set.side} footMinY=${footMinY} clusterY=${this.clusterY} candidates=${candidates.length} cluster=${cluster.length} firstY=${cluster[0]?.y ?? "n/a"} lastY=${cluster[cluster.length - 1]?.y ?? "n/a"}`
     );
 
     if (!cluster.length) return;
