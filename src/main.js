@@ -1,3 +1,4 @@
+
 // src/main.js
 
 import * as THREE from "three";
@@ -1565,72 +1566,33 @@ function initializeBodyState(
  * =======================================================
  */
 
-function formatDiagnostic(
-  diagnostic
-) {
-  const safe =
-    diagnostic || {};
+function formatDiagnostic(diagnostic) {
+  const safe = diagnostic || {};
 
-  const dy =
-    Number.isFinite(
-      safe.dy
-    )
-      ? safe.dy.toFixed(3)
-      : "INF";
+  const probeCount = Number.isFinite(safe.probeCount)
+    ? safe.probeCount
+    : 0;
 
-  const surfaceY =
-    Number.isFinite(
-      safe.footSurfaceY
-    )
-      ? safe.footSurfaceY.toFixed(3)
-      : "INF";
+  const nearProbeCount = Number.isFinite(safe.nearProbeCount)
+    ? safe.nearProbeCount
+    : 0;
 
-  const surfaceDy =
-    Number.isFinite(
-      safe.footSurfaceDy
-    )
-      ? safe.footSurfaceDy.toFixed(3)
-      : "INF";
+  const validProbeCount = Number.isFinite(safe.validProbeCount)
+    ? safe.validProbeCount
+    : 0;
 
-  const vertices =
-    Number.isFinite(
-      safe.footSurfaceVertices
-    )
-      ? safe.footSurfaceVertices
-      : 0;
+  const spread = Number.isFinite(safe.spread)
+    ? safe.spread.toFixed(3)
+    : "INF";
 
-  const vy =
-    Number.isFinite(
-      safe.verticalVelocity
-    )
-      ? safe.verticalVelocity.toFixed(3)
-      : "INF";
-
-  const near =
-    safe.nearGround
-      ? "1"
-      : "0";
-
-  const stable =
-    safe.stableEnough
-      ? "1"
-      : "0";
-
-  const confidence =
-    Number.isFinite(
-      safe.confidence
-    )
-      ? safe.confidence.toFixed(2)
-      : "0";
+  const confidence = Number.isFinite(safe.confidence)
+    ? safe.confidence.toFixed(2)
+    : "0.00";
 
   return (
-    `dy ${dy} ` +
-    `surfY ${surfaceY} ` +
-    `sDy ${surfaceDy} ` +
-    `vtx ${vertices} ` +
-    `vy ${vy} ` +
-    `near ${near} ` +
-    `stable ${stable} ` +
+    `near ${nearProbeCount}/${probeCount} ` +
+    `valid ${validProbeCount}/${probeCount} ` +
+    `spread ${spread} ` +
     `conf ${confidence}`
   );
 }
