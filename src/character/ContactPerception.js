@@ -140,6 +140,11 @@ export class ContactPerception {
     this._lastUpdateTime = 0;
   }
   initialize() {
+    // Keep transforms and skinning data synchronized before sampling.
+    this.root.updateMatrixWorld(true);
+    this.skeleton.update();
+    this.skinnedMesh.updateMatrixWorld(true);
+
     this._probeSets.get("foot_L").reset();
     this._probeSets.get("foot_R").reset();
     const geometry = this.skinnedMesh.geometry;
@@ -490,7 +495,13 @@ export class ContactPerception {
       );
       return;
     }
+
+    // Critical synchronization: update bone world transforms first,
+    // then refresh the bone matrices consumed by SkinnedMesh skinning.
+    this.root.updateMatrixWorld(true);
+    this.skeleton.update();
     this.skinnedMesh.updateMatrixWorld(true);
+
     for (let i = 0; i < set.count; i++) {
       const vertexIndex = set.sampleVertices[i];
       this.skinnedMesh.getVertexPosition(
