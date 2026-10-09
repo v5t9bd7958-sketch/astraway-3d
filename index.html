@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7,6 +8,7 @@
     content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
   />
   <title>AstraWay Character Lab</title>
+
   <style>
     html, body {
       margin: 0;
@@ -18,18 +20,20 @@
       color: #fff;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
+
     #viewer {
       display: block;
       width: 100vw;
       height: 100vh;
     }
+
     #status {
       position: fixed;
       left: 8px;
       right: 8px;
       bottom: 8px;
       padding: 8px 10px;
-      background: rgba(0, 0, 0, 0.72);
+      background: rgba(0, 0, 0, 0.82);
       border-radius: 8px;
       font-size: 11px;
       line-height: 1.35;
@@ -40,18 +44,232 @@
       pointer-events: none;
       z-index: 10;
     }
+
+    #probe-debug {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      right: 8px;
+      max-height: 43vh;
+      overflow: auto;
+      padding: 10px;
+      background: rgba(8, 12, 20, 0.96);
+      border: 1px solid #4d86a8;
+      border-radius: 8px;
+      color: #d8f5ff;
+      z-index: 10000;
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    #probe-debug-header {
+      position: sticky;
+      top: -10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 5px 0 8px;
+      background: #080c14;
+      border-bottom: 1px solid #34556b;
+      margin-bottom: 7px;
+    }
+
+    #probe-debug-title {
+      font-weight: 700;
+      color: #7de6b1;
+    }
+
+    .probe-button {
+      border: 1px solid #62849a;
+      border-radius: 5px;
+      padding: 6px 9px;
+      background: #172a38;
+      color: white;
+      font-size: 12px;
+      touch-action: manipulation;
+    }
+
+    #probe-debug-output {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    #probe-debug-help {
+      color: #9eb3c2;
+      margin-top: 7px;
+    }
   </style>
 </head>
+
 <body>
   <canvas id="viewer"></canvas>
   <div id="status">AstraWay — загрузка…</div>
 
-  <!-- Eruda: мобильная консоль для iPhone Safari -->
+  <section id="probe-debug">
+    <div id="probe-debug-header">
+      <span id="probe-debug-title">AstraWay PROBE DEBUG</span>
+      <div>
+        <button id="probe-copy" class="probe-button" type="button">
+          Копировать
+        </button>
+        <button id="probe-clear" class="probe-button" type="button">
+          Очистить
+        </button>
+      </div>
+    </div>
+
+    <pre id="probe-debug-output">Ожидание probeDump…
+Если данные не появятся, проверь, что открыта свежая версия игры.</pre>
+
+    <div id="probe-debug-help">
+      Здесь отображаются реальные console.log ContactPerception.
+    </div>
+  </section>
+
+  <!-- Mobile console; the visible panel above works independently of Eruda. -->
   <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
   <script>
     if (window.eruda) {
       window.eruda.init();
     }
+  </script>
+
+  <!-- Capture existing probeDump logs without changing game logic. -->
+  <script>
+    (() => {
+      const output = document.getElementById("probe-debug-output");
+      const copyButton = document.getElementById("probe-copy");
+      const clearButton = document.getElementById("probe-clear");
+
+      const originalLog = console.log.bind(console);
+      const lines = [];
+
+      let activeBone = null;
+      let remainingProbes = 0;
+      let foundDump = false;
+
+      function render() {
+        output.textContent = lines.length
+          ? lines.join("\n")
+          : "Ожидание probeDump…";
+      }
+
+      function formatArgs(args) {
+        return args.map((value) => {
+          if (typeof value === "string") return value;
+
+          try {
+            return JSON.stringify(value);
+          } catch (_) {
+            return String(value);
+          }
+        }).join(" ");
+      }
+
+      console.log = function (...args) {
+        originalLog(...args);
+
+        const message = formatArgs(args);
+
+        if (message.includes("[AstraWay:probeDump]")) {
+          foundDump = true;
+          activeBone = null;
+          remainingProbes = 0;
+
+          const boneMatch = message.match(/bone=(foot_L|foot_R)/);
+          const countMatch = message.match(/probeCount=(\d+)/);
+
+          if (boneMatch) {
+            activeBone = boneMatch[1];
+            remainingProbes = countMatch
+              ? Number(countMatch[1])
+              : 0;
+          }
+
+          lines.push(message);
+          render();
+          return;
+        }
+
+        if (
+          activeBone &&
+          remainingProbes > 0 &&
+          message.startsWith(activeBone + "[")
+        ) {
+          lines.push(message);
+          remainingProbes--;
+
+          if (remainingProbes === 0) {
+            activeBone = null;
+          }
+
+          render();
+        }
+      };
+
+      copyButton.addEventListener("click", () => {
+        const text = lines.join("\n");
+
+        if (!text) {
+          output.textContent = "Пока нечего копировать — probeDump не получен.";
+          return;
+        }
+
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+
+        let copied = false;
+
+        try {
+          copied = document.execCommand("copy");
+        } catch (_) {
+          copied = false;
+        }
+
+        area.remove();
+
+        output.textContent = copied
+          ? text + "\n\n[Скопировано]"
+          : text + "\n\nНе удалось скопировать автоматически. Выдели текст панели вручную.";
+        render();
+      });
+
+      clearButton.addEventListener("click", () => {
+        lines.length = 0;
+        foundDump = false;
+        activeBone = null;
+        remainingProbes = 0;
+        render();
+      });
+
+      window.addEventListener("error", (event) => {
+        lines.push(
+          "[PAGE ERROR] " +
+          (event.message || "unknown error") +
+          " " +
+          (event.filename || "") +
+          ":" +
+          (event.lineno || "")
+        );
+        render();
+      });
+
+      window.addEventListener("unhandledrejection", (event) => {
+        lines.push(
+          "[PROMISE ERROR] " + String(event.reason)
+        );
+        render();
+      });
+    })();
   </script>
 
   <!-- AstraWay main entry -->
