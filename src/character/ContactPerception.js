@@ -1,4 +1,3 @@
-
 import * as THREE from "three";
 import { BONE_MAP } from "./BoneMap.js";
 
@@ -34,8 +33,8 @@ const EPSILON = 1e-8;
 
 export class ContactPerception {
   static DEFAULT_CONFIG = Object.freeze({
-    footInfluenceMin: 0.35,
-    shinInfluenceMax: 0.30,
+    footInfluenceMin: 0.50,
+    shinInfluenceMax: 0.05,
 
     targetProbes: 5,
     clusterY: 0.03,
