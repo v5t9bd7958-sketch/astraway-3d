@@ -223,13 +223,12 @@ export class ContactPerception {
     this._skinWeightScratch = [0, 0, 0, 0];
   }
 
-  _number(value, fallback,
-, min, max) {
-    const number = Number     .isFinite(value temporal) ? value : fallback;
-    returnContact Math.max(min, Math.min(max, number));
-:  }
+  _number(value, fallback, min, max) {
+    const number = Number.isFinite(value) ? value : fallback;
+    return Math.max(min, Math.min(max, number));
+  }
 
-  _ falsecreateEvidence(bone, side) {
+  _createEvidence(bone, side) {
     return {
       valid: false,
       point: new THREE.Vector3(),
@@ -255,6 +254,7 @@ export class ContactPerception {
       velocityRatio: 0,
       voteRatio: 0,
       rawContact: false,
+      temporalContact: false,
       acceptedProbeCount: 0,
     };
   }
@@ -771,22 +771,6 @@ export class ContactPerception {
       probeDumpRow.separation = Number.isFinite(separation)
         ? separation
         : null;
-
-      if (this.debug) {
-        console.log("[AstraWay ContactProbe]", {
-          side: set.side,
-          probe: i,
-          separation: Number.isFinite(separation)
-            ? Number(separation.toFixed(4))
-            : separation,
-          contactDistance: this.contactDistance,
-          maxPenetration: this.maxPenetration,
-          near: Number.isFinite(separation) &&
-            separation <= this.contactDistance,
-          rejectedByPenetration: Number.isFinite(separation) &&
-            separation < -this.maxPenetration,
-        });
-      }
 
       if (Number.isFinite(separation)) {
         minSeparation = Math.min(minSeparation, separation);
