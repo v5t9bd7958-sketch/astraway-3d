@@ -6,7 +6,7 @@
     name="viewport"
     content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
   />
-  <title>AstraWay Character Lab</title>
+  <title>AstraWay Character Lab v2</title>
   <style>
     html, body {
       margin: 0;
@@ -172,9 +172,13 @@
           const boneMatch = message.match(/bone=(foot_L|foot_R)/);
           const countMatch = message.match(/probeCount=(\d+)/);
 
-          activeBone = boneMatch ? boneMatch[1] : null;
-          remainingProbes =
-            boneMatch && countMatch ? Number(countMatch[1]) : 0;
+          if (boneMatch) {
+            activeBone = boneMatch[1];
+            remainingProbes = countMatch ? Number(countMatch[1]) : 0;
+          } else {
+            activeBone = null;
+            remainingProbes = 0;
+          }
 
           appendLine(message);
           return;
