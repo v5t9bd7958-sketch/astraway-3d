@@ -1,3 +1,4 @@
+
 // src/character/ContactPerception.js
 import * as THREE from "three";
 import { BONE_MAP } from "./BoneMap.js";
@@ -12,20 +13,16 @@ export class ContactPerception {
   static DEFAULT_CONFIG = Object.freeze({
     footInfluenceMin: 0.50,
     shinInfluenceMax: 0.05,
-
     targetProbes: 5,
     clusterY: 0.03,
     maxFootSpan: 0.22,
-
     heightThreshold: 0.08,
     velocityThreshold: 1.0,
     voteFrames: 5,
-
     queryMaxDistance: 0.20,
     maxPenetration: 0.035,
     minConfidence: 0.40,
     normalMinY: 0.45,
-
     fallbackDeltaTime: 1 / 60,
     debug: false,
   });
@@ -35,17 +32,14 @@ export class ContactPerception {
     skeleton,
     skinnedMesh,
     surfaceQuery,
-
     footInfluenceMin,
     shinInfluenceMax,
     targetProbes,
     clusterY,
     maxFootSpan,
-
     heightThreshold,
     velocityThreshold,
     voteFrames,
-
     contactSeparation,
     contactDistance,
     queryMaxDistance,
@@ -83,17 +77,11 @@ export class ContactPerception {
     this.surfaceQuery = surfaceQuery;
 
     this.footInfluenceMin = this._number(
-      footInfluenceMin,
-      defaults.footInfluenceMin,
-      0,
-      1
+      footInfluenceMin, defaults.footInfluenceMin, 0, 1
     );
 
     this.shinInfluenceMax = this._number(
-      shinInfluenceMax,
-      defaults.shinInfluenceMax,
-      0,
-      1
+      shinInfluenceMax, defaults.shinInfluenceMax, 0, 1
     );
 
     this.targetProbes = Math.round(
@@ -101,38 +89,23 @@ export class ContactPerception {
     );
 
     this.clusterY = this._number(
-      clusterY,
-      defaults.clusterY,
-      0.001,
-      1
+      clusterY, defaults.clusterY, 0.001, 1
     );
 
     this.maxFootSpan = this._number(
-      maxFootSpan,
-      defaults.maxFootSpan,
-      0.01,
-      2
+      maxFootSpan, defaults.maxFootSpan, 0.01, 2
     );
 
     this.heightThreshold = this._number(
-      heightThreshold,
-      defaults.heightThreshold,
-      0.001,
-      0.5
+      heightThreshold, defaults.heightThreshold, 0.001, 0.5
     );
 
     this.contactDistance = this._number(
-      contactDistance,
-      this.heightThreshold,
-      0.001,
-      0.5
+      contactDistance, this.heightThreshold, 0.001, 0.5
     );
 
     this.velocityThreshold = this._number(
-      velocityThreshold,
-      defaults.velocityThreshold,
-      0.001,
-      10
+      velocityThreshold, defaults.velocityThreshold, 0.001, 10
     );
 
     this.voteFrames = Math.round(
@@ -149,31 +122,21 @@ export class ContactPerception {
     );
 
     this.queryMaxDistance = this._number(
-      queryMaxDistance,
-      defaults.queryMaxDistance,
-      this.heightThreshold,
-      2
+      queryMaxDistance, defaults.queryMaxDistance,
+      this.heightThreshold, 2
     );
 
     this.minConfidence = this._number(
-      minConfidence,
-      defaults.minConfidence,
-      0,
-      1
+      minConfidence, defaults.minConfidence, 0, 1
     );
 
     this.normalMinY = this._number(
-      normalMinY,
-      defaults.normalMinY,
-      -1,
-      1
+      normalMinY, defaults.normalMinY, -1, 1
     );
 
     this.fallbackDeltaTime = this._number(
-      fallbackDeltaTime,
-      defaults.fallbackDeltaTime,
-      1 / 1000,
-      0.25
+      fallbackDeltaTime, defaults.fallbackDeltaTime,
+      1 / 1000, 0.25
     );
 
     this.debug = debug === true;
@@ -188,13 +151,11 @@ export class ContactPerception {
     };
 
     this._probeSets.set(
-      "foot_L",
-      this._createProbeSet("foot_L", SIDES.L)
+      "foot_L", this._createProbeSet("foot_L", SIDES.L)
     );
 
     this._probeSets.set(
-      "foot_R",
-      this._createProbeSet("foot_R", SIDES.R)
+      "foot_R", this._createProbeSet("foot_R", SIDES.R)
     );
 
     this._evidence = {
@@ -218,7 +179,6 @@ export class ContactPerception {
 
     this._vertexLocal = new THREE.Vector3();
     this._vertexWorld = new THREE.Vector3();
-
     this._skinIndexScratch = [0, 0, 0, 0];
     this._skinWeightScratch = [0, 0, 0, 0];
   }
@@ -231,7 +191,11 @@ export class ContactPerception {
   _createEvidence(bone, side) {
     return {
       valid: false,
+
+      // Surface hit and actual skinned foot effector are separate.
       point: new THREE.Vector3(),
+      effectorPosition: new THREE.Vector3(),
+
       normal: new THREE.Vector3(0, 1, 0),
       separation: Infinity,
       surfaceId: null,
@@ -263,23 +227,16 @@ export class ContactPerception {
     return {
       logicalBone,
       side,
-
       count: 0,
       sampleVertices: new Uint32Array(8),
-
       samples: Array.from(
-        { length: 8 },
-        () => new THREE.Vector3()
+        { length: 8 }, () => new THREE.Vector3()
       ),
-
       previousSamples: Array.from(
-        { length: 8 },
-        () => new THREE.Vector3()
+        { length: 8 }, () => new THREE.Vector3()
       ),
-
       sampleSpeeds: new Float32Array(8),
       sampleHasPrevious: new Uint8Array(8),
-
       votes: new Uint8Array(this.voteFrames),
       voteCount: 0,
       voteCursor: 0,
@@ -362,8 +319,7 @@ export class ContactPerception {
         candidatesL.push(candidate);
 
         this._footMinY[SIDES.L] = Math.min(
-          this._footMinY[SIDES.L],
-          candidate.y
+          this._footMinY[SIDES.L], candidate.y
         );
       }
 
@@ -384,20 +340,17 @@ export class ContactPerception {
         candidatesR.push(candidate);
 
         this._footMinY[SIDES.R] = Math.min(
-          this._footMinY[SIDES.R],
-          candidate.y
+          this._footMinY[SIDES.R], candidate.y
         );
       }
     }
 
     this._buildProbeSet(
-      this._probeSets.get("foot_L"),
-      candidatesL
+      this._probeSets.get("foot_L"), candidatesL
     );
 
     this._buildProbeSet(
-      this._probeSets.get("foot_R"),
-      candidatesR
+      this._probeSets.get("foot_R"), candidatesR
     );
 
     for (const set of this._probeSets.values()) {
@@ -428,15 +381,11 @@ export class ContactPerception {
     this._lastUpdateTime = Number.isFinite(time) ? time : 0;
 
     this._measureProbeSet(
-      this._probeSets.get("foot_L"),
-      this._evidence.left,
-      dt
+      this._probeSets.get("foot_L"), this._evidence.left, dt
     );
 
     this._measureProbeSet(
-      this._probeSets.get("foot_R"),
-      this._evidence.right,
-      dt
+      this._probeSets.get("foot_R"), this._evidence.right, dt
     );
 
     return this._evidence;
@@ -535,8 +484,12 @@ export class ContactPerception {
 
     for (let i = 0; i < 4; i++) {
       if (indices[i] === footIndex) footWeight += weights[i];
-      if (toeIndex >= 0 && indices[i] === toeIndex) toeWeight += weights[i];
-      if (shinIndex >= 0 && indices[i] === shinIndex) shinWeight += weights[i];
+      if (toeIndex >= 0 && indices[i] === toeIndex) {
+        toeWeight += weights[i];
+      }
+      if (shinIndex >= 0 && indices[i] === shinIndex) {
+        shinWeight += weights[i];
+      }
     }
 
     return {
@@ -549,8 +502,7 @@ export class ContactPerception {
 
   _readWorldVertex(vertexIndex, out) {
     this.skinnedMesh.getVertexPosition(
-      vertexIndex,
-      this._vertexLocal
+      vertexIndex, this._vertexLocal
     );
 
     out.copy(this._vertexLocal);
@@ -568,8 +520,7 @@ export class ContactPerception {
     if (!Number.isFinite(footMinY)) return;
 
     const cluster = candidates.filter(
-      (candidate) =>
-        candidate.y <= footMinY + this.clusterY
+      (candidate) => candidate.y <= footMinY + this.clusterY
     );
 
     console.log(
@@ -598,6 +549,7 @@ export class ContactPerception {
         const alreadySelected = selected.some(
           (chosen) => candidate.index === chosen.index
         );
+
         if (alreadySelected) continue;
 
         let nearestSq = Infinity;
@@ -631,9 +583,7 @@ export class ContactPerception {
       set.sampleVertices[i] = candidate.index;
 
       set.samples[i].set(
-        candidate.x,
-        candidate.y,
-        candidate.z
+        candidate.x, candidate.y, candidate.z
       );
 
       set.previousSamples[i].copy(set.samples[i]);
@@ -646,6 +596,7 @@ export class ContactPerception {
     evidence.valid = false;
 
     evidence.point.set(0, 0, 0);
+    evidence.effectorPosition.set(0, 0, 0);
     evidence.normal.set(0, 1, 0);
 
     evidence.separation = Infinity;
@@ -700,6 +651,10 @@ export class ContactPerception {
     let pointX = 0;
     let pointY = 0;
     let pointZ = 0;
+
+    let effectorX = 0;
+    let effectorY = 0;
+    let effectorZ = 0;
 
     let normalX = 0;
     let normalY = 0;
@@ -790,7 +745,9 @@ export class ContactPerception {
       if (
         Number.isFinite(speed) &&
         speed <= this.velocityThreshold
-      ) slowCount++;
+      ) {
+        slowCount++;
+      }
 
       if (Number.isFinite(speed)) {
         totalSpeed += speed;
@@ -810,6 +767,13 @@ export class ContactPerception {
         acceptedCount--;
         if (near) acceptedNearCount--;
         continue;
+      }
+
+      // Actual skinned vertex position, not the surface hit point.
+      if (near) {
+        effectorX += sample.x;
+        effectorY += sample.y;
+        effectorZ += sample.z;
       }
 
       normalX += result.normal.x;
@@ -838,8 +802,7 @@ export class ContactPerception {
       : 0;
 
     evidence.confidence = Math.max(
-      0,
-      Math.min(1, evidence.confidence)
+      0, Math.min(1, evidence.confidence)
     );
 
     evidence.probeAgreement = evidence.confidence;
@@ -853,8 +816,7 @@ export class ContactPerception {
       Number.isFinite(maxSeparation)
     ) {
       evidence.spread = Math.max(
-        0,
-        maxSeparation - minSeparation
+        0, maxSeparation - minSeparation
       );
     } else {
       evidence.spread = 0;
@@ -939,6 +901,16 @@ export class ContactPerception {
       pointY * inverse,
       pointZ * inverse
     );
+
+    if (acceptedNearCount > 0) {
+      const effectorInverse = 1 / acceptedNearCount;
+
+      evidence.effectorPosition.set(
+        effectorX * effectorInverse,
+        effectorY * effectorInverse,
+        effectorZ * effectorInverse
+      );
+    }
 
     evidence.normal.set(normalX, normalY, normalZ);
 
