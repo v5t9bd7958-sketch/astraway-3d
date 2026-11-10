@@ -2,64 +2,12 @@
 
 import * as THREE from 'three';
 
-/**
- * ConstraintSolver
- *
- * Damped Least Squares (DLS) positional solver.
- *
- * IMPORTANT OWNERSHIP RULE:
- * - Solver NEVER mutates bones.
- * - Solver NEVER calls IK.
- * - Solver NEVER writes pose.
- * - Solver only reads the current skeleton state and returns a delta pose.
- *
- * Pipeline:
- *
- *   ConstraintSet
- *        ↓
- *   ConstraintSolver
- *        ↓
- *   deltaPose
- *        ↓
- *   PoseWriter
- *        ↓
- *   Skeleton
- *
- * Mathematical core:
- *
- *   Δθ = Jᵀ (J Jᵀ + λ² I)⁻¹ e
- *
- * For a 3D positional constraint:
- *
- *   J = 3 × (3N)
- *
- * and therefore:
- *
- *   J Jᵀ = 3 × 3
- *
- * This keeps the actual matrix inversion very small and suitable
- * for mobile / iPhone runtime.
- */
-
 export class ConstraintSolver {
     constructor({
         skeleton = null,
-
         damping = 0.12,
-
-        /**
-         * Maximum angular delta applied to a single bone
-         * during one solver step.
-         *
-         * Radians.
-         */
         maxAngleStep = 0.20,
-
-        /**
-         * Position error below this value is considered solved.
-         */
         positionTolerance = 0.005,
-
         enabled = true
     } = {}) {
         this.skeleton = skeleton;
@@ -83,21 +31,6 @@ export class ConstraintSolver {
         this.enabled = Boolean(enabled);
     }
 
-    /**
-     * Main entry point.
-     *
-     * Returns:
-     *
-     * {
-     *   status,
-     *   solved,
-     *   constraints,
-     *   deltaPose,
-     *   maxError,
-     *   totalDelta,
-     *   solveTime
-     * }
-     */
     solve(constraintSet, {
         skeleton = this.skeleton
     } = {}) {
@@ -157,12 +90,6 @@ export class ConstraintSolver {
             });
         }
 
-        /**
-         * Make sure matrices represent the pose that currently exists.
-         *
-         * This is READ/UPDATE state only.
-         * No bone transforms are modified here.
-         */
         this._updateWorldMatrices(skeleton);
 
         const deltaPose = new Map();
@@ -218,13 +145,6 @@ export class ConstraintSolver {
         });
     }
 
-    /**
-     * Solve one positional constraint.
-     *
-     * This is one DLS step.
-     *
-     * It intentionally does NOT mutate the skeleton.
-     */
     _solvePositionConstraint(constraint, skeleton, deltaPose) {
         const bone = this._resolveBone(constraint, skeleton);
 
@@ -246,9 +166,11 @@ export class ConstraintSolver {
             };
         }
 
-        const current = new THREE.Vector3();
-
-        bone.getWorldPosition(current);
+        // Actual measured contact point, not the foot-bone origin.
+        const current = this._getEffectorWorldPosition(
+            constraint,
+            bone
+        );
 
         const error = new THREE.Vector3()
             .subVectors(target, current);
@@ -281,16 +203,6 @@ export class ConstraintSolver {
             };
         }
 
-        /**
-         * Jacobian:
-         *
-         * each rotational DOF contributes:
-         *
-         *     J_i = axis_world × (effector - joint)
-         *
-         * We have 3 rows (XYZ task)
-         * and 3 rotational DOFs per bone.
-         */
         const columns = [];
 
         for (const joint of chain) {
@@ -323,39 +235,20 @@ export class ConstraintSolver {
             };
         }
 
-        /**
-         * Compute:
-         *
-         * A = J Jᵀ + λ² I
-         *
-         * A is 3×3.
-         */
         const lambda = Math.max(0.000001, this.damping);
         const lambdaSq = lambda * lambda;
 
-        const a00 = lambdaSq;
-        const a01 = 0;
-        const a02 = 0;
+        let m00 = lambdaSq;
+        let m01 = 0;
+        let m02 = 0;
 
-        const a10 = 0;
-        const a11 = lambdaSq;
-        const a12 = 0;
+        let m10 = 0;
+        let m11 = lambdaSq;
+        let m12 = 0;
 
-        const a20 = 0;
-        const a21 = 0;
-        const a22 = lambdaSq;
-
-        let m00 = a00;
-        let m01 = a01;
-        let m02 = a02;
-
-        let m10 = a10;
-        let m11 = a11;
-        let m12 = a12;
-
-        let m20 = a20;
-        let m21 = a21;
-        let m22 = a22;
+        let m20 = 0;
+        let m21 = 0;
+        let m22 = lambdaSq;
 
         for (const column of columns) {
             const j = column.value;
@@ -373,11 +266,6 @@ export class ConstraintSolver {
             m22 += j.z * j.z;
         }
 
-        /**
-         * Invert 3×3 matrix.
-         *
-         * Damping keeps the matrix away from singularity.
-         */
         const inverse = this._invert3x3(
             m00, m01, m02,
             m10, m11, m12,
@@ -392,9 +280,6 @@ export class ConstraintSolver {
             };
         }
 
-        /**
-         * y = (J Jᵀ + λ²I)^-1 e
-         */
         const y = new THREE.Vector3(
             inverse.m00 * error.x +
                 inverse.m01 * error.y +
@@ -409,9 +294,6 @@ export class ConstraintSolver {
                 inverse.m22 * error.z
         );
 
-        /**
-         * Δθ = Jᵀ y
-         */
         for (const column of columns) {
             const j = column.value;
 
@@ -447,13 +329,6 @@ export class ConstraintSolver {
             );
         }
 
-        /**
-         * This is deliberately only a one-step DLS solver.
-         *
-         * We do not pretend that the predicted post-step error
-         * is the real measured error, because we have not yet
-         * applied the pose.
-         */
         const deltaMagnitude = this._calculateDeltaMagnitude(
             deltaPose,
             chain
@@ -467,8 +342,46 @@ export class ConstraintSolver {
     }
 
     /**
-     * Resolve the constraint's logical bone.
+     * Resolve current positional effector.
+     * Contact tasks provide the measured WORLD-space foot point.
+     * Older constraints fall back to the bone origin.
      */
+    _getEffectorWorldPosition(constraint, bone) {
+        const value =
+            constraint.metadata?.effectorPosition;
+
+        if (
+            Array.isArray(value) &&
+            value.length >= 3 &&
+            Number.isFinite(value[0]) &&
+            Number.isFinite(value[1]) &&
+            Number.isFinite(value[2])
+        ) {
+            return new THREE.Vector3(
+                value[0],
+                value[1],
+                value[2]
+            );
+        }
+
+        if (
+            value &&
+            Number.isFinite(value.x) &&
+            Number.isFinite(value.y) &&
+            Number.isFinite(value.z)
+        ) {
+            return new THREE.Vector3(
+                value.x,
+                value.y,
+                value.z
+            );
+        }
+
+        return bone.getWorldPosition(
+            new THREE.Vector3()
+        );
+    }
+
     _resolveBone(constraint, skeleton) {
         const metadata = constraint.metadata || {};
 
@@ -501,11 +414,6 @@ export class ConstraintSolver {
         return null;
     }
 
-    /**
-     * Build the chain from effector to root.
-     *
-     * Every ancestor is a potential rotational joint.
-     */
     _buildRotationChain(effector) {
         const chain = [];
 
@@ -519,19 +427,9 @@ export class ConstraintSolver {
             current = current.parent;
         }
 
-        /**
-         * The root itself can be included.
-         * Whether the production policy allows root rotation
-         * can be restricted later through joint metadata.
-         */
         return chain;
     }
 
-    /**
-     * Return the three world-space rotation axes of a bone.
-     *
-     * They are obtained from the bone's current world quaternion.
-     */
     _getWorldRotationAxes(bone) {
         const q = new THREE.Quaternion();
 
@@ -552,12 +450,6 @@ export class ConstraintSolver {
         return [x, y, z];
     }
 
-    /**
-     * Target position is currently expected in WORLD space.
-     *
-     * TaskConstraintBuilder currently creates WORLD positional
-     * constraints, so this is the authoritative path.
-     */
     _getTargetWorldPosition(constraint) {
         const target = constraint.target;
 
@@ -592,9 +484,6 @@ export class ConstraintSolver {
         return null;
     }
 
-    /**
-     * Update matrices without changing the pose.
-     */
     _updateWorldMatrices(skeleton) {
         if (skeleton.bones && skeleton.bones.length) {
             const root = skeleton.bones[0];
@@ -607,11 +496,6 @@ export class ConstraintSolver {
         }
     }
 
-    /**
-     * Convert internal Map into public deltaPose array.
-     *
-     * The solver output is intentionally explicit and serializable.
-     */
     _mapToPoseArray(deltaPose) {
         const result = [];
 
@@ -660,12 +544,6 @@ export class ConstraintSolver {
         return total;
     }
 
-    /**
-     * Stable 3×3 inverse.
-     *
-     * Returns null only if the matrix is genuinely non-invertible.
-     * Damping should normally prevent that state.
-     */
     _invert3x3(
         m00, m01, m02,
         m10, m11, m12,
