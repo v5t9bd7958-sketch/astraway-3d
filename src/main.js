@@ -1431,6 +1431,12 @@ function initializeBodyState(
       defaultSurfaceType:
         "unknown",
     });
+      // Perception V1: регистрируем геометрию мира.
+  // Пока регистрируем существующий визуальный ground.
+  // Позже сюда будут добавляться платформы, ступени, стены и т.д.
+  if (typeof ground !== "undefined" && ground) {
+    surfaceQuery.addMesh(ground);
+  }
 
   contactPerception =
     new ContactPerception({
