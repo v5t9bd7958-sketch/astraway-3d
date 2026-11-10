@@ -179,6 +179,7 @@ export class ContactPerception {
 
     this._vertexLocal = new THREE.Vector3();
     this._vertexWorld = new THREE.Vector3();
+    this._queryOrigin = new THREE.Vector3();
     this._skinIndexScratch = [0, 0, 0, 0];
     this._skinWeightScratch = [0, 0, 0, 0];
   }
@@ -704,9 +705,16 @@ export class ContactPerception {
       previous.copy(sample);
       set.sampleHasPrevious[i] = 1;
 
+      // Start the ray above the allowed penetration depth.
+      // SurfaceQuery rejects rays that begin below the ground plane;
+      // lifting the origin lets the query detect shallow penetration.
+      // Subtract the lift so separation remains relative to the real vertex.
+      const queryOrigin = this._queryOrigin.copy(sample);
+      queryOrigin.y += this.maxPenetration;
+
       const result = this.surfaceQuery.queryDown({
-        origin: sample,
-        maxDistance: this.queryMaxDistance,
+        origin: queryOrigin,
+        maxDistance: this.queryMaxDistance + this.maxPenetration,
         out: this._queryResult,
       });
 
@@ -714,7 +722,7 @@ export class ContactPerception {
 
       validCount++;
 
-      const separation = result.separation;
+      const separation = result.separation - this.maxPenetration;
 
       probeDumpRow.valid = true;
       probeDumpRow.separation = Number.isFinite(separation)
