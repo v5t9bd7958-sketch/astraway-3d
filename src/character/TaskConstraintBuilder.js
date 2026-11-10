@@ -31,27 +31,6 @@ export class TaskConstraintBuilder {
       );
     }
 
-    /*
-     * Builder получает только RESOLVED tasks.
-     *
-     * Он:
-     * - не двигает кости;
-     * - не вызывает IK;
-     * - не меняет BodyState;
-     * - не меняет ContactState.
-     *
-     * Его задача:
-     *
-     * logical task
-     *      ↓
-     * constraint
-     *
-     * Здесь же происходит единственная
-     * адаптация:
-     *
-     * logical bone → canonical THREE.Bone name
-     */
-
     const tasks = [
       ...taskPlan.hard,
       ...taskPlan.soft,
@@ -81,11 +60,6 @@ export class TaskConstraintBuilder {
       );
     }
 
-    /*
-     * Удаляем constraints,
-     * соответствующие задачам,
-     * которые больше не существуют.
-     */
     for (
       const constraint
       of this.constraintSet.getAll()
@@ -114,13 +88,6 @@ export class TaskConstraintBuilder {
       );
     }
 
-    /*
-     * Неизвестные типы задач
-     * явно игнорируются.
-     *
-     * Новые типы добавляются
-     * отдельными builders.
-     */
     return null;
   }
 
@@ -137,17 +104,6 @@ export class TaskConstraintBuilder {
       return null;
     }
 
-    /*
-     * Task работает с нашей
-     * логической анатомией.
-     *
-     * Solver работает с реальными
-     * именами THREE.Bone.
-     *
-     * Поэтому переводим здесь:
-     *
-     * foot_L → LeftFoot
-     */
     const canonicalBone =
       BONE_MAP[logicalBone] ??
       null;
@@ -202,19 +158,17 @@ export class TaskConstraintBuilder {
         taskType:
           task.type,
 
-        /*
-         * Для диагностики сохраняем
-         * оба уровня идентичности.
-         */
         logicalBone:
           logicalBone,
 
-        /*
-         * ЭТО значение читает
-         * ConstraintSolver.
-         */
         bone:
           canonicalBone,
+
+        // Forward the actual measured WORLD-space effector.
+        effectorPosition:
+          Array.isArray(task.metadata?.effectorPosition)
+            ? [...task.metadata.effectorPosition]
+            : null,
 
         surfaceId:
           task.metadata?.surfaceId ??
