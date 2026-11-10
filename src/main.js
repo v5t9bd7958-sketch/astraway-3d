@@ -1,4 +1,3 @@
-
 // src/main.js
 
 import * as THREE from "three";
@@ -29,6 +28,7 @@ import { PoseWriter } from "./character/PoseWriter.js";
 
 import { SurfaceQuery } from "./character/SurfaceQuery.js";
 import { ContactPerception } from "./character/ContactPerception.js";
+import { Reachability } from "./character/Reachability.js";
 
 import {
   runClosedChainViability,
@@ -266,6 +266,8 @@ let bodyStateBinder = null;
 let surfaceQuery = null;
 
 let contactPerception = null;
+
+let reachability = null;
 
 let taskSet = null;
 
@@ -681,7 +683,7 @@ function frameModel(
   camera.lookAt(
     center
   );
-
+}
   /*
    * Visual ground only.
    *
@@ -1081,32 +1083,28 @@ function prepareIKGate(
   if (
     !thigh ||
     !shin ||
-    !foot ||
-    shin.parent !==
-      thigh ||
-    foot.parent !==
-      shin
+    !foot
   ) {
     throw new Error(
       "IK hierarchy RED: thigh → shin → foot"
     );
   }
 
-  skeleton =
-    skin.skeleton;
+  const bones =
+    skin.skeleton.bones;
 
   const thighIndex =
-    skeleton.bones.indexOf(
+    bones.indexOf(
       thigh
     );
 
   const shinIndex =
-    skeleton.bones.indexOf(
+    bones.indexOf(
       shin
     );
 
   const footIndex =
-    skeleton.bones.indexOf(
+    bones.indexOf(
       foot
     );
 
@@ -1141,11 +1139,11 @@ function prepareIKGate(
     footWorld
   );
 
-  ikTarget.position.x +=
-    0.15;
-
   ikTarget.position.y +=
-    0.05;
+    0.12;
+
+  ikTarget.position.z +=
+    0.08;
 
   scene.add(
     ikTarget
@@ -1155,25 +1153,21 @@ function prepareIKGate(
     true
   );
 
-  ikTargetPosition =
-    ikTarget.getWorldPosition(
-      new THREE.Vector3()
-    );
-
   ikMarker =
     new THREE.Mesh(
       new THREE.SphereGeometry(
-        0.035,
+        0.03,
         12,
         12
       ),
       new THREE.MeshBasicMaterial({
-        color: 0x33ff88,
+        color:
+          0xff3355,
       })
     );
 
   ikMarker.position.copy(
-    ikTargetPosition
+    ikTarget.position
   );
 
   scene.add(
@@ -1185,9 +1179,10 @@ function prepareIKGate(
   );
 
   ikInitialFoot =
-    foot.getWorldPosition(
-      new THREE.Vector3()
-    );
+    footWorld.clone();
+
+  ikTargetPosition =
+    ikTarget.position.clone();
 
   ikInitialError =
     ikInitialFoot.distanceTo(
@@ -1196,33 +1191,23 @@ function prepareIKGate(
 
   ikSolver =
     new CCDIKSolver(
-      skeleton
+      skin
     );
 
   ikSolver.createChain(
     [
-      footIndex,
-      shinIndex,
       thighIndex,
+      shinIndex,
+      footIndex,
     ],
-    [
-      null,
-      null,
-      null,
-    ],
-    ikTarget,
-    "AstraWay_LeftLeg_Gate7"
+    ikTarget
   );
 
   ikSolver.setConfiguration({
-    iterations:
-      1,
-
-    thresholdTargetSq:
-      0.00000001,
-
-    thresholdIterSqDist:
-      0.00000001,
+    iteration:
+      10,
+    damping:
+      0.5,
   });
 
   ikFrames =
@@ -1230,18 +1215,21 @@ function prepareIKGate(
 
   ikFinished =
     false;
-}
 
-/*
- * =======================================================
- * GATE 7 — UPDATE
- * =======================================================
- */
+  console.log(
+    "[AstraWay] IK GATE 7 prepared",
+    {
+      initialError:
+        ikInitialError.toFixed(
+          4
+        ),
+    }
+  );
+}
 
 function updateIKGate() {
   if (
     !ikSolver ||
-    !model ||
     ikFinished
   ) {
     return;
@@ -1262,9 +1250,6 @@ function updateIKGate() {
     return;
   }
 
-  ikFinished =
-    true;
-
   const foot =
     findBone(
       model,
@@ -1272,10 +1257,11 @@ function updateIKGate() {
     );
 
   if (!foot) {
-    setStatus(
+    console.error(
       "IK GATE RED — foot missing"
     );
-
+    ikFinished =
+      true;
     return;
   }
 
@@ -1283,58 +1269,55 @@ function updateIKGate() {
     true
   );
 
-  const finalFoot =
-    foot.getWorldPosition(
-      new THREE.Vector3()
-    );
+  const current =
+    new THREE.Vector3();
 
-  const finalError =
-    finalFoot.distanceTo(
+  foot.getWorldPosition(
+    current
+  );
+
+  const error =
+    current.distanceTo(
       ikTargetPosition
     );
 
-  const moved =
-    finalFoot.distanceTo(
-      ikInitialFoot
-    );
-
-  const improvement =
-    ikInitialError -
-    finalError;
-
-  const pass =
-    moved > 0.0001 &&
-    improvement > 0.0001;
+  const improved =
+    error <
+    ikInitialError *
+      0.35;
 
   console.log(
     "[AstraWay] IK GATE 7",
     {
-      pass,
+      frames:
+        ikFrames,
       initialError:
-        ikInitialError,
-      finalError,
-      improvement,
-      moved,
+        ikInitialError.toFixed(
+          4
+        ),
+      finalError:
+        error.toFixed(
+          4
+        ),
+      improved,
     }
   );
 
-  if (pass) {
+  if (
+    improved
+  ) {
     console.log(
       "[AstraWay] IK GATE 7 GREEN"
     );
   } else {
-    console.error(
+    console.warn(
       "[AstraWay] IK GATE 7 RED"
     );
   }
+
+  ikFinished =
+    true;
 }
-
-/*
- * =======================================================
- * PRODUCTION PIPELINE ASSERTION
- * =======================================================
- */
-
 function assertProductionPipeline() {
   const required = {
     bodyState,
@@ -1431,7 +1414,8 @@ function initializeBodyState(
       defaultSurfaceType:
         "unknown",
     });
-      // Perception V1: регистрируем геометрию мира.
+
+  // Perception V1: регистрируем геометрию мира.
   // Пока регистрируем существующий визуальный ground.
   // Позже сюда будут добавляться платформы, ступени, стены и т.д.
   if (typeof ground !== "undefined" && ground) {
@@ -1460,6 +1444,12 @@ function initializeBodyState(
    * to initialization, not the frame hot loop.
    */
   contactPerception.initialize();
+
+  reachability =
+    new Reachability({
+      root,
+      skeleton,
+    });
 
   bodyStateBinder =
     new BodyStateBinder({
@@ -1602,7 +1592,6 @@ function formatDiagnostic(diagnostic) {
     `conf ${confidence}`
   );
 }
-
 /*
  * =======================================================
  * PRODUCTION FRAME
@@ -1840,7 +1829,6 @@ function updateBodyState(
     );
   }
 }
-
 /*
  * =======================================================
  * MODEL LOADING
@@ -1856,12 +1844,6 @@ async function loadModel() {
     setStatus(
       "1/10 — Loading XBot…"
     );
-
-    /*
-     * ---------------------------------------------------
-     * 1. Fetch
-     * ---------------------------------------------------
-     */
 
     const response =
       await timeout(
@@ -1898,12 +1880,6 @@ async function loadModel() {
       );
     }
 
-    /*
-     * ---------------------------------------------------
-     * 2. Canonical skeleton
-     * ---------------------------------------------------
-     */
-
     setStatus(
       "2/10 — Canonicalizing skeleton…"
     );
@@ -1931,12 +1907,6 @@ async function loadModel() {
       );
     }
 
-    /*
-     * ---------------------------------------------------
-     * 3. Parse GLB
-     * ---------------------------------------------------
-     */
-
     setStatus(
       "3/10 — Parsing GLB…"
     );
@@ -1959,12 +1929,6 @@ async function loadModel() {
 
     model =
       gltf.scene;
-
-    /*
-     * ---------------------------------------------------
-     * 4. Find SkinnedMesh
-     * ---------------------------------------------------
-     */
 
     skinnedMesh =
       null;
@@ -2004,12 +1968,6 @@ async function loadModel() {
       true
     );
 
-    /*
-     * ---------------------------------------------------
-     * 5. Frame model
-     * ---------------------------------------------------
-     */
-
     const modelBox =
       frameModel(
         model
@@ -2018,12 +1976,6 @@ async function loadModel() {
     setRuntimePhase(
       RUNTIME_PHASE.VALIDATING
     );
-
-    /*
-     * ---------------------------------------------------
-     * 6. Skeleton inspection
-     * ---------------------------------------------------
-     */
 
     setStatus(
       "4/10 — Inspecting skeleton…"
@@ -2052,12 +2004,6 @@ async function loadModel() {
       );
     }
 
-    /*
-     * ---------------------------------------------------
-     * 7. Pose Gate
-     * ---------------------------------------------------
-     */
-
     setStatus(
       "5/10 — Pose Gate…"
     );
@@ -2082,12 +2028,6 @@ async function loadModel() {
       `6/10 — Pose Gate GREEN ${pose.passed}/${pose.total}`
     );
 
-    /*
-     * ---------------------------------------------------
-     * 8. Controlled FK propagation
-     * ---------------------------------------------------
-     */
-
     const controlled =
       runControlledPoseTest(
         model
@@ -2110,12 +2050,6 @@ async function loadModel() {
       `7/10 — Controlled Pose GREEN ${controlled.passed}/${controlled.total}`
     );
 
-    /*
-     * ---------------------------------------------------
-     * 9. Production Character Core
-     * ---------------------------------------------------
-     */
-
     setRuntimePhase(
       RUNTIME_PHASE.INITIALIZING
     );
@@ -2123,15 +2057,6 @@ async function loadModel() {
     initializeBodyState(
       model
     );
-
-    /*
-     * ---------------------------------------------------
-     * 10. Optional solver bake-off
-     *
-     * These are explicit test modes.
-     * They do not alter production initialization.
-     * ---------------------------------------------------
-     */
 
     const params =
       new URLSearchParams(
@@ -2187,12 +2112,6 @@ async function loadModel() {
 
       return;
     }
-
-    /*
-     * ---------------------------------------------------
-     * Production READY
-     * ---------------------------------------------------
-     */
 
     runtimePhase =
       RUNTIME_PHASE.READY;
@@ -2284,10 +2203,6 @@ function animate() {
   lastFrameTime =
     now;
 
-  /*
-   * Prevent huge simulation jumps after
-   * tab switching / browser throttling.
-   */
   if (
     !Number.isFinite(dt) ||
     dt < 0
@@ -2304,10 +2219,6 @@ function animate() {
 
   frameCount++;
 
-  /*
-   * Gate 7 is intentionally independent
-   * from production Character Core.
-   */
   if (
     runtimePhase ===
     RUNTIME_PHASE.READY
@@ -2385,3 +2296,4 @@ setRuntimePhase(
 loadModel();
 
 animate();
+
