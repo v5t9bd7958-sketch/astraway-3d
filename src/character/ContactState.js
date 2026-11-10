@@ -37,8 +37,9 @@ export class ContactState {
 
     this.phase = CONTACT_PHASE.NONE;
 
-    // Current measured contact geometry.
+    // Surface contact point and actual foot effector are distinct.
     this.point = new THREE.Vector3();
+    this.effectorPosition = new THREE.Vector3();
     this.normal = new THREE.Vector3(0, 1, 0);
 
     // Fixed world-space anchor used by planted tasks.
@@ -82,13 +83,6 @@ export class ContactState {
     this.transitionCount = 0;
   }
 
-  /**
-   * Update measured point.
-   *
-   * point may move every frame.
-   * target is updated only while the contact
-   * is not PLANTED.
-   */
   _updateMeasuredPoint(point) {
     if (
       !point ||
@@ -108,11 +102,6 @@ export class ContactState {
     return true;
   }
 
-  /**
-   * Explicitly establish a new world-space anchor.
-   * Called only when a contact becomes planted
-   * or is deliberately replanted.
-   */
   _setAnchor(point = this.point) {
     if (
       !point ||
@@ -127,9 +116,6 @@ export class ContactState {
     return true;
   }
 
-  /**
-   * Consume ContactPerception evidence.
-   */
   applyEvidence(evidence, dt = 0) {
     if (!evidence) {
       return this._handleMissingEvidence(dt);
@@ -170,8 +156,17 @@ export class ContactState {
       this.surfaceType = evidence.surfaceType;
     }
 
-    // Update measurement, but never move a planted anchor.
+    // Surface point remains separate from the measured foot effector.
     this._updateMeasuredPoint(evidence.point);
+
+    if (
+      evidence.effectorPosition &&
+      Number.isFinite(evidence.effectorPosition.x) &&
+      Number.isFinite(evidence.effectorPosition.y) &&
+      Number.isFinite(evidence.effectorPosition.z)
+    ) {
+      this.effectorPosition.copy(evidence.effectorPosition);
+    }
 
     if (
       evidence.normal &&
@@ -207,7 +202,6 @@ export class ContactState {
       this.lastValidAge += delta;
     }
 
-    // NONE / RELEASED -> CANDIDATE
     if (
       this.phase === CONTACT_PHASE.NONE ||
       this.phase === CONTACT_PHASE.RELEASED
@@ -219,7 +213,6 @@ export class ContactState {
       return this;
     }
 
-    // CANDIDATE -> ESTABLISHED
     if (this.phase === CONTACT_PHASE.CANDIDATE) {
       if (!usable) {
         this._transition(CONTACT_PHASE.NONE);
@@ -233,7 +226,6 @@ export class ContactState {
       return this;
     }
 
-    // ESTABLISHED -> PLANTED
     if (this.phase === CONTACT_PHASE.ESTABLISHED) {
       if (!usable) {
         this._transition(CONTACT_PHASE.BREAKING);
@@ -241,11 +233,8 @@ export class ContactState {
       }
 
       if (this.plantEvidenceAge >= this.plantTime) {
-        // Freeze the latest measured point as the anchor.
         this._setAnchor(this.point);
-
         this._transition(CONTACT_PHASE.PLANTED);
-
         this.isSupport = this.type === "support";
         return this;
       }
@@ -253,7 +242,6 @@ export class ContactState {
       return this;
     }
 
-    // PLANTED remains fixed while evidence is usable.
     if (this.phase === CONTACT_PHASE.PLANTED) {
       if (!usable) {
         this._transition(CONTACT_PHASE.BREAKING);
@@ -265,15 +253,12 @@ export class ContactState {
       return this;
     }
 
-    // BREAKING -> recovery or RELEASED
     if (this.phase === CONTACT_PHASE.BREAKING) {
       if (usable) {
         this.breakAge = 0;
 
         if (this.confidence >= this.plantConfidence) {
-          // A recovered contact gets a new anchor.
           this._setAnchor(this.point);
-
           this._transition(CONTACT_PHASE.PLANTED);
           this.isSupport = this.type === "support";
         } else {
@@ -295,10 +280,6 @@ export class ContactState {
     return this;
   }
 
-  /**
-   * Compatibility API.
-   * Does not move an existing PLANTED anchor.
-   */
   setCandidate({
     point,
     normal,
@@ -336,9 +317,6 @@ export class ContactState {
     return this;
   }
 
-  /**
-   * Explicit establishment.
-   */
   establish() {
     if (
       this.phase === CONTACT_PHASE.CANDIDATE ||
@@ -350,11 +328,6 @@ export class ContactState {
     return this;
   }
 
-  /**
-   * Explicit planting.
-   *
-   * This is an intentional anchor reset.
-   */
   plant({
     point = this.point,
     normal = this.normal,
@@ -385,9 +358,6 @@ export class ContactState {
     return this;
   }
 
-  /**
-   * Begin breaking.
-   */
   break() {
     if (
       this.phase !== CONTACT_PHASE.NONE &&
@@ -402,9 +372,6 @@ export class ContactState {
     return this;
   }
 
-  /**
-   * Release immediately.
-   */
   release() {
     this._transition(CONTACT_PHASE.RELEASED);
 
@@ -417,13 +384,11 @@ export class ContactState {
     return this;
   }
 
-  /**
-   * Full reset.
-   */
   reset() {
     this._transition(CONTACT_PHASE.NONE);
 
     this.point.set(0, 0, 0);
+    this.effectorPosition.set(0, 0, 0);
     this.normal.set(0, 1, 0);
     this.target.set(0, 0, 0);
 
@@ -453,9 +418,6 @@ export class ContactState {
     return this;
   }
 
-  /**
-   * Advance temporal state.
-   */
   update(dt) {
     if (!Number.isFinite(dt) || dt < 0) {
       return this;
@@ -471,9 +433,6 @@ export class ContactState {
     return this;
   }
 
-  /**
-   * Lifecycle transition helper.
-   */
   _transition(nextPhase) {
     if (this.phase === nextPhase) {
       return;
@@ -495,9 +454,6 @@ export class ContactState {
     }
   }
 
-  /**
-   * Missing evidence path.
-   */
   _handleMissingEvidence(dt) {
     const delta =
       Number.isFinite(dt) && dt > 0
@@ -575,6 +531,7 @@ export class ContactState {
     copy.phase = this.phase;
 
     copy.point.copy(this.point);
+    copy.effectorPosition.copy(this.effectorPosition);
     copy.normal.copy(this.normal);
     copy.target.copy(this.target);
 
