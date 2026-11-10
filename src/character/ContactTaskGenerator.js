@@ -1,4 +1,3 @@
-
 // src/character/ContactTaskGenerator.js
 
 import {
@@ -41,13 +40,11 @@ export class ContactTaskGenerator {
 
     const taskId = `maintain:${contact.id}`;
 
-    // Only confirmed planted contacts create maintenance tasks.
     if (!contact.isPlanted()) {
       this.taskSet.remove(taskId);
       return;
     }
 
-    // ContactState.bone is a logical identifier, not THREE.Bone.
     const logicalBone =
       typeof contact.bone === "string"
         ? contact.bone
@@ -58,12 +55,7 @@ export class ContactTaskGenerator {
       return;
     }
 
-    /*
-     * IMPORTANT:
-     * target is the fixed world-space anchor.
-     * point is the latest measured contact position
-     * and must NOT be used as the maintenance target.
-     */
+    // Fixed world-space anchor.
     const target =
       contact.target?.clone
         ? contact.target.clone()
@@ -102,6 +94,16 @@ export class ContactTaskGenerator {
 
       metadata: {
         bone: logicalBone,
+
+        // Actual measured contact point in WORLD space.
+        // This is the solver's positional effector.
+        effectorPosition:
+          contact.point &&
+          Number.isFinite(contact.point.x) &&
+          Number.isFinite(contact.point.y) &&
+          Number.isFinite(contact.point.z)
+            ? contact.point.toArray()
+            : null,
 
         surfaceId: contact.surfaceId,
         surfaceType: contact.surfaceType,
