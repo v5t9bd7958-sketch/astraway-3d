@@ -1,3 +1,4 @@
+
 // src/main.js
 
 import * as THREE from "three";
@@ -683,7 +684,7 @@ function frameModel(
   camera.lookAt(
     center
   );
-}
+
   /*
    * Visual ground only.
    *
@@ -1318,6 +1319,7 @@ function updateIKGate() {
   ikFinished =
     true;
 }
+
 function assertProductionPipeline() {
   const required = {
     bodyState,
@@ -1592,6 +1594,7 @@ function formatDiagnostic(diagnostic) {
     `conf ${confidence}`
   );
 }
+
 /*
  * =======================================================
  * PRODUCTION FRAME
@@ -1829,6 +1832,7 @@ function updateBodyState(
     );
   }
 }
+
 /*
  * =======================================================
  * MODEL LOADING
@@ -2296,4 +2300,3 @@ setRuntimePhase(
 loadModel();
 
 animate();
-
