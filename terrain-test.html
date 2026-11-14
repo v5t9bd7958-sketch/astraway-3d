@@ -1,0 +1,282 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>AstraWay Terrain Test</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#090b10;color:#e8edf5;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+canvas{display:block;width:100%;height:100%}
+#panel{position:fixed;top:10px;left:10px;right:10px;padding:12px;background:rgba(8,13,22,.94);border:1px solid #40566e;border-radius:10px;z-index:5;font:12px/1.5 ui-monospace,monospace}
+#title{font-weight:700;color:#83e6b4;margin-bottom:6px}
+#summary{color:#d9e6f5;margin-bottom:8px}
+#grid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
+.cell{padding:7px 2px;text-align:center;border-radius:5px;background:#263341;color:#fff}
+.cell.warn{background:#79552b}
+.cell.bad{background:#713b42}
+#legend{margin-top:8px;color:#a9bacb;font-size:10px}
+#help{position:fixed;bottom:10px;left:10px;right:10px;padding:8px;background:rgba(8,13,22,.85);border-radius:8px;color:#b8c7d8;font-size:11px;z-index:5}
+</style>
+</head>
+<body>
+<div id="panel">
+  <div id="title">ASTRAWAY — TERRAIN PERCEPTION TEST</div>
+  <div id="summary">Инициализация…</div>
+  <div id="grid"></div>
+  <div id="legend">Число = высота поверхности · ! = перепад · ^ = крутой уклон · — = нет поверхности</div>
+</div>
+<div id="help">Тестовая лестница: пол → ступень 1 → ступень 2. Персонаж и production pipeline не затрагиваются.</div>
+
+<script type="module">
+import * as THREE from "three";
+import { SurfaceQuery } from "./src/character/SurfaceQuery.js";
+import { TerrainPerception } from "./src/character/TerrainPerception.js";
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x090b10);
+
+const camera = new THREE.PerspectiveCamera(
+  42,
+  window.innerWidth / window.innerHeight,
+  0.01,
+  100
+);
+
+camera.position.set(2.8, 2.7, 3.8);
+camera.lookAt(0, 0.15, 1.0);
+
+const renderer = new THREE.WebGLRenderer({
+  antialias: true,
+  alpha: false
+});
+
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0xdde8ff, 0x20232b, 2.0));
+
+const light = new THREE.DirectionalLight(0xffffff, 2.2);
+light.position.set(3, 5, 2);
+scene.add(light);
+
+const floorMaterial = new THREE.MeshStandardMaterial({
+  color: 0x26313d,
+  roughness: 0.9
+});
+
+const stepMaterial1 = new THREE.MeshStandardMaterial({
+  color: 0x526d80,
+  roughness: 0.8
+});
+
+const stepMaterial2 = new THREE.MeshStandardMaterial({
+  color: 0x718c9b,
+  roughness: 0.8
+});
+
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(4, 4),
+  floorMaterial
+);
+
+floor.rotation.x = -Math.PI / 2;
+floor.position.set(0, 0, 1);
+floor.userData.astrawaySurfaceId = "test_floor";
+floor.userData.astrawaySurfaceType = "ground";
+scene.add(floor);
+
+function createStep(id, height, z, material) {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(1.0, height, 0.7),
+    material
+  );
+
+  mesh.position.set(0, height * 0.5, z);
+  mesh.userData.astrawaySurfaceId = id;
+  mesh.userData.astrawaySurfaceType = "platform";
+  scene.add(mesh);
+
+  return mesh;
+}
+
+const step1 = createStep(
+  "test_step_1",
+  0.14,
+  0.8,
+  stepMaterial1
+);
+
+const step2 = createStep(
+  "test_step_2",
+  0.28,
+  1.5,
+  stepMaterial2
+);
+
+const gridHelper = new THREE.GridHelper(4, 20, 0x526273, 0x263341);
+gridHelper.position.set(0, 0.003, 1);
+scene.add(gridHelper);
+
+const origin = new THREE.Vector3(0, 0, 0);
+const forward = new THREE.Vector3(0, 0, 1);
+
+const originMarker = new THREE.Mesh(
+  new THREE.SphereGeometry(0.045, 16, 12),
+  new THREE.MeshBasicMaterial({ color: 0xff4455 })
+);
+
+originMarker.position.set(0, 0.05, 0);
+scene.add(originMarker);
+
+const forwardArrow = new THREE.ArrowHelper(
+  forward,
+  origin,
+  0.55,
+  0x55ddaa,
+  0.12,
+  0.07
+);
+
+scene.add(forwardArrow);
+
+const surfaceQuery = new SurfaceQuery({
+  groundY: 0,
+  defaultSurfaceId: "test_ground",
+  defaultSurfaceType: "ground"
+});
+
+surfaceQuery.addMesh(floor);
+surfaceQuery.addMesh(step1);
+surfaceQuery.addMesh(step2);
+
+const terrainPerception = new TerrainPerception({
+  surfaceQuery
+});
+
+const markers = [];
+
+for (let i = 0; i < 25; i++) {
+  const marker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.025, 10, 8),
+    new THREE.MeshBasicMaterial({ color: 0x55ddaa })
+  );
+
+  marker.visible = false;
+  scene.add(marker);
+  markers.push(marker);
+}
+
+const summaryElement = document.querySelector("#summary");
+const gridElement = document.querySelector("#grid");
+
+function updateTerrain() {
+  scene.updateMatrixWorld(true);
+
+  const result = terrainPerception.scan({
+    origin,
+    forward
+  });
+
+  const cells = [];
+
+  for (let i = 0; i < result.samples.length; i++) {
+    const sample = result.samples[i];
+    const marker = markers[i];
+
+    if (!sample.valid) {
+      marker.visible = false;
+      cells.push(
+        '<div class="cell bad">—</div>'
+      );
+      continue;
+    }
+
+    marker.visible = true;
+    marker.position.set(
+      sample.point.x,
+      sample.point.y + 0.025,
+      sample.point.z
+    );
+
+    let markerColor = 0x55ddaa;
+
+    if (sample.steep) {
+      markerColor = 0xff5555;
+    } else if (sample.heightDiscontinuity) {
+      markerColor = 0xffbb55;
+    }
+
+    marker.material.color.setHex(markerColor);
+
+    const value = sample.height.toFixed(2);
+    const flag = sample.steep
+      ? "^"
+      : sample.heightDiscontinuity
+        ? "!"
+        : "";
+
+    const css = sample.steep
+      ? "bad"
+      : sample.heightDiscontinuity
+        ? "warn"
+        : "";
+
+    cells.push(
+      `<div class="cell ${css}">${value}${flag}</div>`
+    );
+  }
+
+  gridElement.innerHTML = cells.join("");
+
+  const pass =
+    result.validCount === 25 &&
+    result.discontinuityCount > 0;
+
+  summaryElement.textContent =
+    `${pass ? "TEST GREEN" : "TEST CHECK"} | ` +
+    `valid ${result.validCount}/25 | ` +
+    `missing ${result.missingCount} | ` +
+    `steep ${result.steepCount} | ` +
+    `discontinuities ${result.discontinuityCount} | ` +
+    `center ${Number.isFinite(result.centerHeight)
+      ? result.centerHeight.toFixed(3)
+      : "NaN"}`;
+}
+
+let lastScan = 0;
+
+renderer.setAnimationLoop((time) => {
+  if (time - lastScan >= 250) {
+    lastScan = time;
+
+    try {
+      updateTerrain();
+    } catch (error) {
+      summaryElement.textContent =
+        "TERRAIN ERROR: " + error.message;
+
+      console.error("[TERRAIN TEST ERROR]", error);
+    }
+  }
+
+  renderer.render(scene, camera);
+});
+
+window.addEventListener("resize", () => {
+  camera.aspect =
+    window.innerWidth / Math.max(window.innerHeight, 1);
+
+  camera.updateProjectionMatrix();
+
+  renderer.setSize(
+    window.innerWidth,
+    window.innerHeight
+  );
+});
+</script>
+</body>
+</html>
