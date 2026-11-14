@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -167,6 +168,11 @@
         originalLog(...args);
 
         const message = formatArgs(args);
+
+        if (message.includes("[AstraWay] TERRAIN PERCEPTION")) {
+          appendLine(message);
+          return;
+        }
 
         if (message.includes("[AstraWay:probeDump]")) {
           const boneMatch = message.match(/bone=(foot_L|foot_R)/);
