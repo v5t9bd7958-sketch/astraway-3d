@@ -30,6 +30,7 @@ import { PoseWriter } from "./character/PoseWriter.js";
 import { SurfaceQuery } from "./character/SurfaceQuery.js";
 import { ContactPerception } from "./character/ContactPerception.js";
 import { Reachability } from "./character/Reachability.js";
+import { TerrainPerception } from "./character/TerrainPerception.js";
 
 import {
   runClosedChainViability,
@@ -267,6 +268,21 @@ let bodyStateBinder = null;
 let surfaceQuery = null;
 
 let contactPerception = null;
+
+let terrainPerception = null;
+
+const terrainOrigin =
+  new THREE.Vector3();
+
+const terrainForward =
+  new THREE.Vector3();
+
+const terrainQuaternion =
+  new THREE.Quaternion();
+
+let terrainLastScanAt = 0;
+
+let terrainLastLogAt = 0;
 
 let reachability = null;
 
@@ -1424,6 +1440,15 @@ function initializeBodyState(
     surfaceQuery.addMesh(ground);
   }
 
+  /*
+   * Terrain perception observes local geometry.
+   * It does not participate in the movement pipeline yet.
+   */
+  terrainPerception =
+    new TerrainPerception({
+      surfaceQuery,
+    });
+
   contactPerception =
     new ContactPerception({
       root,
@@ -1553,7 +1578,7 @@ function initializeBodyState(
         poseWriter.snapshot(),
 
       perception:
-        "ContactPerception + SurfaceQuery",
+        "ContactPerception + TerrainPerception + SurfaceQuery",
     }
   );
 }
@@ -1656,6 +1681,118 @@ function updateBodyState(
     model.updateMatrixWorld(
       true
     );
+  }
+
+  /*
+   * =====================================================
+   * TERRAIN PERCEPTION
+   *
+   * Observation only.
+   *
+   * No movement decisions.
+   * No tasks.
+   * No bone writes.
+   *
+   * Scan frequency: 4 Hz.
+   * =====================================================
+   */
+
+  const terrainNow =
+    performance.now();
+
+  if (
+    terrainPerception &&
+    model &&
+    terrainNow - terrainLastScanAt >= 250
+  ) {
+    terrainLastScanAt =
+      terrainNow;
+
+    model.getWorldPosition(
+      terrainOrigin
+    );
+
+    model.getWorldQuaternion(
+      terrainQuaternion
+    );
+
+    /*
+     * Provisional forward direction: local +Z.
+     * This orientation must be verified in runtime.
+     */
+    terrainForward
+      .set(0, 0, 1)
+      .applyQuaternion(
+        terrainQuaternion
+      )
+      .setY(0)
+      .normalize();
+
+    const terrain =
+      terrainPerception.scan({
+        origin: terrainOrigin,
+        forward: terrainForward,
+      });
+
+    if (
+      terrainNow - terrainLastLogAt >= 1000
+    ) {
+      terrainLastLogAt =
+        terrainNow;
+
+      let minHeight = Infinity;
+      let maxHeight = -Infinity;
+
+      for (const sample of terrain.samples) {
+        if (!sample.valid) {
+          continue;
+        }
+
+        minHeight = Math.min(
+          minHeight,
+          sample.height
+        );
+
+        maxHeight = Math.max(
+          maxHeight,
+          sample.height
+        );
+      }
+
+      console.log(
+        "[AstraWay] TERRAIN PERCEPTION",
+        {
+          valid:
+            terrain.validCount,
+
+          missing:
+            terrain.missingCount,
+
+          steep:
+            terrain.steepCount,
+
+          discontinuities:
+            terrain.discontinuityCount,
+
+          minHeight:
+            Number.isFinite(minHeight)
+              ? minHeight.toFixed(3)
+              : null,
+
+          maxHeight:
+            Number.isFinite(maxHeight)
+              ? maxHeight.toFixed(3)
+              : null,
+
+          forward:
+            terrainForward
+              .toArray()
+              .map(
+                (value) => value.toFixed(2)
+              ),
+        }
+      );
+    }
   }
 
   bodyStateFrames++;
