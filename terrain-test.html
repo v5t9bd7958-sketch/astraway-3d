@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -51,6 +52,19 @@ canvas{
 #scoreSummary{
   color:#83e6b4;
   margin-bottom:7px
+}
+
+#qaSummary{
+  color:#d9e6f5;
+  margin-bottom:7px
+}
+
+#qaSummary.pass{
+  color:#83e6b4
+}
+
+#qaSummary.fail{
+  color:#ff7777
 }
 
 #grid{
@@ -128,6 +142,10 @@ canvas{
     Инициализация FootholdScoring…
   </div>
 
+  <div id="qaSummary">
+    Инициализация контрольных проверок…
+  </div>
+
   <div id="grid"></div>
 
   <div id="legend">
@@ -140,6 +158,7 @@ canvas{
 
 <div id="help">
   Изолированный тест: TerrainPerception → FootholdScoring.
+  Контрольные проверки используют синтетические данные.
   Персонаж и production pipeline не затрагиваются.
 </div>
 
@@ -336,7 +355,7 @@ const terrainPerception = new TerrainPerception({
 });
 
 
-const footholdScoring = new FootholdScoring({
+const scoringConfig = {
   maxStepHeight: 0.12,
   maxSlopeRadians: THREE.MathUtils.degToRad(30),
   footRadius: 0.13,
@@ -344,7 +363,11 @@ const footholdScoring = new FootholdScoring({
   supportRadius: 0.24,
   minSupportSamples: 2,
   maxLocalHeightRange: 0.035
-});
+};
+
+const footholdScoring = new FootholdScoring(
+  scoringConfig
+);
 
 
 const markers = [];
@@ -371,8 +394,133 @@ const summaryElement =
 const scoreSummaryElement =
   document.querySelector("#scoreSummary");
 
+const qaSummaryElement =
+  document.querySelector("#qaSummary");
+
 const gridElement =
   document.querySelector("#grid");
+
+
+/*
+ * Контрольные данные для проверки отказов.
+ * Эти данные не поступают в TerrainPerception
+ * и не влияют на 3D-сцену.
+ */
+function createSyntheticSamples({
+  validOnlyCenter = false,
+  steepCenter = false
+} = {}) {
+  const samples = [];
+
+  for (let row = 0; row < 3; row++) {
+    for (let column = 0; column < 3; column++) {
+      const index = row * 3 + column;
+
+      const center =
+        row === 1 && column === 1;
+
+      const valid =
+        !validOnlyCenter || center;
+
+      samples.push({
+        index,
+        row,
+        column,
+
+        valid,
+
+        point: new THREE.Vector3(
+          column * 0.1,
+          0,
+          row * 0.1
+        ),
+
+        height: 0,
+
+        slopeRadians:
+          steepCenter && center
+            ? THREE.MathUtils.degToRad(45)
+            : 0,
+
+        surfaceId: "synthetic_test",
+        surfaceType: "platform"
+      });
+    }
+  }
+
+  return samples;
+}
+
+
+function runScoringChecks() {
+  const checker = new FootholdScoring(
+    scoringConfig
+  );
+
+
+  // Проверка 1: центральная точка с уклоном 45°.
+  const steepResult = checker.evaluate({
+    samples: createSyntheticSamples({
+      steepCenter: true
+    })
+  });
+
+  const steepCandidate =
+    steepResult.candidates[4];
+
+  const steepPass =
+    !!steepCandidate &&
+    !steepCandidate.eligible &&
+    steepCandidate.reasons.includes("SLOPE");
+
+
+  // Проверка 2: у центральной точки
+  // отсутствуют соседние опорные пробы.
+  const supportResult = checker.evaluate({
+    samples: createSyntheticSamples({
+      validOnlyCenter: true
+    })
+  });
+
+  const supportCandidate =
+    supportResult.candidates[4];
+
+  const supportPass =
+    !!supportCandidate &&
+    !supportCandidate.eligible &&
+    supportCandidate.reasons.includes("SUPPORT");
+
+
+  const passed =
+    steepPass &&
+    supportPass;
+
+  qaSummaryElement.className =
+    passed ? "pass" : "fail";
+
+  qaSummaryElement.textContent =
+    `${passed ? "QA REJECT GREEN" : "QA REJECT FAIL"} | ` +
+    `slope ${steepPass ? "REJECTED" : "FAILED"} | ` +
+    `support ${supportPass ? "REJECTED" : "FAILED"}`;
+
+  console.log("[FOOTHOLD QA]", {
+    passed,
+    steep: {
+      passed: steepPass,
+      eligible: steepCandidate?.eligible,
+      reasons: steepCandidate?.reasons
+    },
+    support: {
+      passed: supportPass,
+      eligible: supportCandidate?.eligible,
+      reasons: supportCandidate?.reasons
+    }
+  });
+}
+
+
+// Контрольные проверки выполняются один раз.
+runScoringChecks();
 
 
 function updateTerrain() {
