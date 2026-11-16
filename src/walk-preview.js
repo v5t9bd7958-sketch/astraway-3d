@@ -4,6 +4,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { canonicalizeGLBBones } from "@three-ws/retarget";
 import { createProceduralHuman } from "three-procedural-locomotion";
+import { WorldAdapter } from "./world/WorldAdapter.js";
 
 const canvas = document.querySelector("#viewer");
 const status = document.querySelector("#status");
@@ -174,6 +175,7 @@ const MODEL_URL = `${import.meta.env.BASE_URL}models/Xbot.glb`;
 
 let human = null;
 let characterRoot = null;
+let worldAdapter = null;
 
 const UP = new THREE.Vector3(0, 1, 0);
 const forward = new THREE.Vector3(0, 0, -1);
@@ -212,11 +214,10 @@ function findBone(root, name) {
 }
 
 /* =========================================================
-   ADAPTIVE TEST ENVIRONMENT
+   ADAPTIVE WORLD GEOMETRY
 ========================================================= */
 
 const obstacleMeshes = [];
-const obstacleColliders = [];
 
 function createColumn(position, radius = 0.38, height = 1.8) {
   const mesh = new THREE.Mesh(
@@ -238,15 +239,12 @@ function createColumn(position, radius = 0.38, height = 1.8) {
   mesh.castShadow = true;
   mesh.receiveShadow = true;
 
+  mesh.userData.astraWay = {
+    role: "obstacle",
+  };
+
   scene.add(mesh);
-
   obstacleMeshes.push(mesh);
-
-  obstacleColliders.push({
-    center: new THREE.Vector3(position.x, 0, position.z),
-    radius,
-    height,
-  });
 
   return mesh;
 }
@@ -649,9 +647,8 @@ async function loadCharacter() {
     const stairYaw = Math.atan2(-forward.x, -forward.z);
 
     /*
-     * Two obstacles:
-     * one in the direct route, another offset to create
-     * a more complex navigation choice.
+     * Navigation obstacles.
+     * WorldAdapter derives collider descriptors from their geometry.
      */
 
     const firstColumn = forward
@@ -668,8 +665,7 @@ async function loadCharacter() {
     createColumn(secondColumn, 0.34, 1.55);
 
     /*
-     * Stairs and an adjacent slope.
-     * Both are actual ground meshes for the donor's raycasts.
+     * Stairs and slope are registered as walkable geometry.
      */
 
     const stairStart = forward
@@ -687,14 +683,28 @@ async function loadCharacter() {
 
     createRamp(rampStart, stairYaw, 0.36, 2.2);
 
-    setStatus("3/5 — Подключение адаптивного движения…");
+    setStatus("3/5 — Подключение World Adapter…");
+
+    worldAdapter = new WorldAdapter({
+      scene,
+      characterRoots: [characterRoot],
+      ground: groundMeshes,
+      obstacles: obstacleMeshes,
+      touchables: obstacleMeshes,
+      includeTaggedObjects: true,
+    });
+
+    const worldOptions = worldAdapter.toProceduralHumanOptions();
+    const worldDiagnostics = worldAdapter.getDiagnostics();
+
+    if (!worldDiagnostics.ready) {
+      throw new Error("World Adapter: walkable world unavailable");
+    }
 
     human = createProceduralHuman({
       model: characterRoot,
       mapping: xbotMapping,
-      ground: groundMeshes,
-      colliders: obstacleColliders,
-      touchables: obstacleMeshes,
+      ...worldOptions,
       forward,
       preset: "athletic",
       bodyScale: "auto",
@@ -745,7 +755,7 @@ async function loadCharacter() {
       bodyScale: human.bodyScale,
       speedScale: human.speedScale,
       warnings: human.warnings,
-      obstacleCount: obstacleColliders.length,
+      world: worldDiagnostics,
       stairHeight: staircase.height,
       stairLength: staircase.length,
     });
@@ -785,7 +795,7 @@ function moveToScreenPoint(event) {
   raycaster.setFromCamera(pointer, camera);
 
   const intersections = raycaster.intersectObjects(
-    groundMeshes,
+    worldAdapter.getGround(),
     false
   );
 
@@ -809,7 +819,6 @@ function moveToScreenPoint(event) {
 
   human.moveTo(target, {
     run: runEnabled,
-    avoid: true,
   });
 
   setStatus(
@@ -851,6 +860,7 @@ function updateHUD(now) {
 
   const route = human.movePath;
   const routeCount = route ? route.length : 0;
+  const world = worldAdapter.getDiagnostics();
 
   const warnings = human.warnings.length
     ? `\nПРЕДУПРЕЖДЕНИЯ: ${human.warnings.length}`
@@ -865,6 +875,7 @@ function updateHUD(now) {
     `Прыжок: ${human.jumpPhase}`,
     `Руки: L ${human.touchPhase("left")} · R ${human.touchPhase("right")}`,
     `Точек маршрута: ${routeCount}`,
+    `Мир: пол ${world.groundCount} · препятствия ${world.colliderCount}`,
     `Автокасание: ${human.autoTouch ? "ON" : "OFF"}`,
     warnings,
   ].join("\n");
