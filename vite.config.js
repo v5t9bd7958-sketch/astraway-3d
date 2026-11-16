@@ -1,3 +1,4 @@
+
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
 
@@ -11,6 +12,7 @@ export default defineConfig({
       input: {
         main: resolve(process.cwd(), "index.html"),
         terrainTest: resolve(process.cwd(), "terrain-test.html"),
+        gate8b: resolve(process.cwd(), "gate8b.html"),
       },
     },
   },
