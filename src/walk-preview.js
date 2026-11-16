@@ -1,24 +1,20 @@
 
 import * as THREE from "three";
-
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { canonicalizeGLBBones } from "@three-ws/retarget";
-
-import {
-  createProceduralHuman,
-} from "three-procedural-locomotion";
+import { createProceduralHuman } from "three-procedural-locomotion";
 
 const canvas = document.querySelector("#viewer");
 const status = document.querySelector("#status");
 
 function setStatus(message) {
   status.textContent = message;
-  console.log("[AstraWay Walk]", message);
+  console.log("[AstraWay]", message);
 }
 
 /*
- * XBOT → PROCEDURAL HUMAN RIG
+ * XBOT RIG MAPPING
  */
 
 const xbotMapping = {
@@ -73,7 +69,7 @@ const xbotMapping = {
 };
 
 /*
- * RENDERER AND SCENE
+ * SCENE
  */
 
 const renderer = new THREE.WebGLRenderer({
@@ -123,7 +119,7 @@ ground.name = "WalkableGround";
 scene.add(ground);
 
 /*
- * TAP TARGET MARKER
+ * TARGET MARKER
  */
 
 const targetMarker = new THREE.Group();
@@ -161,7 +157,7 @@ targetMarker.add(markerCenter);
 scene.add(targetMarker);
 
 /*
- * MODEL AND LOCOMOTION
+ * MODEL
  */
 
 const loader = new GLTFLoader();
@@ -172,15 +168,10 @@ const MODEL_URL =
 
 let human = null;
 let characterRoot = null;
-let forward = new THREE.Vector3(0, 0, -1);
 
+const forward = new THREE.Vector3(0, 0, -1);
 const lookTarget = new THREE.Vector3();
 const cameraOffset = new THREE.Vector3();
-
-const toeLeftPosition = new THREE.Vector3();
-const toeRightPosition = new THREE.Vector3();
-const footLeftPosition = new THREE.Vector3();
-const footRightPosition = new THREE.Vector3();
 
 function toArrayBuffer(value) {
   if (value instanceof ArrayBuffer) {
@@ -214,7 +205,90 @@ function findBone(root, name) {
 }
 
 /*
- * LOAD CHARACTER
+ * OBSTACLE
+ *
+ * One visible column and one matching cylinder collider.
+ * The collider is an explicit navigation input.
+ */
+
+const obstacleRadius = 0.48;
+const obstacleHeight = 1.65;
+
+let obstacleMesh = null;
+let obstacleCollider = null;
+
+function createObstacle() {
+  const obstacleBase = forward
+    .clone()
+    .multiplyScalar(2.6);
+
+  obstacleBase.y = 0;
+
+  obstacleMesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(
+      obstacleRadius,
+      obstacleRadius,
+      obstacleHeight,
+      32
+    ),
+    new THREE.MeshStandardMaterial({
+      color: 0x9a7044,
+      roughness: 0.72,
+      metalness: 0.18,
+    })
+  );
+
+  obstacleMesh.position.set(
+    obstacleBase.x,
+    obstacleHeight / 2,
+    obstacleBase.z
+  );
+
+  obstacleMesh.castShadow = true;
+  obstacleMesh.receiveShadow = true;
+  obstacleMesh.name = "NavigationObstacle";
+
+  scene.add(obstacleMesh);
+
+  obstacleCollider = {
+    center: obstacleBase.clone(),
+    radius: obstacleRadius,
+    height: obstacleHeight,
+  };
+
+  console.log("[AstraWay] OBSTACLE CREATED", {
+    center: obstacleBase.toArray(),
+    radius: obstacleRadius,
+    height: obstacleHeight,
+  });
+}
+
+/*
+ * CAMERA
+ */
+
+function updateCamera() {
+  if (!characterRoot) return;
+
+  cameraOffset
+    .copy(forward)
+    .negate()
+    .multiplyScalar(4.2);
+
+  cameraOffset.y = 1.8;
+
+  camera.position
+    .copy(characterRoot.position)
+    .add(cameraOffset);
+
+  lookTarget.copy(characterRoot.position);
+  lookTarget.y += 0.95;
+
+  camera.lookAt(lookTarget);
+}
+
+/*
+ * LOAD AND INITIALIZE
  */
 
 async function loadCharacter() {
@@ -272,10 +346,6 @@ async function loadCharacter() {
 
     scene.updateMatrixWorld(true);
 
-    /*
-     * Определяем направление по стопам и пальцам.
-     */
-
     const leftFoot = findBone(model, "LeftFoot");
     const rightFoot = findBone(model, "RightFoot");
     const leftToe = findBone(model, "LeftToeBase");
@@ -285,19 +355,29 @@ async function loadCharacter() {
       throw new Error("Не найдена цепочка стоп XBot");
     }
 
-    leftFoot.getWorldPosition(footLeftPosition);
-    rightFoot.getWorldPosition(footRightPosition);
+    const leftDirection = new THREE.Vector3();
+    const rightDirection = new THREE.Vector3();
 
-    leftToe.getWorldPosition(toeLeftPosition);
-    rightToe.getWorldPosition(toeRightPosition);
+    leftFoot.getWorldPosition(leftDirection);
+    leftToe.getWorldPosition(leftDirection.clone());
+
+    const leftToePosition = new THREE.Vector3();
+    const rightFootPosition = new THREE.Vector3();
+    const rightToePosition = new THREE.Vector3();
+
+    leftFoot.getWorldPosition(leftDirection);
+    leftToe.getWorldPosition(leftToePosition);
+
+    rightFoot.getWorldPosition(rightFootPosition);
+    rightToe.getWorldPosition(rightToePosition);
 
     forward
-      .copy(toeLeftPosition)
-      .sub(footLeftPosition)
+      .copy(leftToePosition)
+      .sub(leftDirection)
       .add(
-        toeRightPosition
+        rightToePosition
           .clone()
-          .sub(footRightPosition)
+          .sub(rightFootPosition)
       )
       .setY(0);
 
@@ -307,12 +387,19 @@ async function loadCharacter() {
 
     forward.normalize();
 
-    setStatus("3/4 — Подключаю процедурную походку…");
+    /*
+     * Create obstacle only after detecting the model's forward.
+     */
+
+    createObstacle();
+
+    setStatus("3/4 — Подключаю навигацию и походку…");
 
     human = createProceduralHuman({
       model: characterRoot,
       mapping: xbotMapping,
       ground: [ground],
+      colliders: [obstacleCollider],
       forward,
       preset: "athletic",
     });
@@ -321,24 +408,28 @@ async function loadCharacter() {
       console.warn("[AstraWay] Locomotion warnings", human.warnings);
     }
 
-    /*
-     * Начальная камера.
-     */
+    human.on("arrive", () => {
+      setStatus(
+        "ЦЕЛЬ ДОСТИГНУТА\n" +
+        "Коснись земли для следующей цели"
+      );
+    });
 
     updateCamera();
 
     setStatus(
-      "ГОТОВ | XBot\n" +
-      "Коснись земли — персонаж пойдёт к точке"
+      "ГОТОВ | OBSTACLE TEST\n" +
+      "Колонна впереди. Коснись земли за ней."
     );
 
-    console.log("[AstraWay] TAP-TO-MOVE READY", {
+    console.log("[AstraWay] OBSTACLE NAVIGATION READY", {
       forward: forward.toArray(),
+      collider: obstacleCollider,
       warnings: human.warnings,
     });
 
   } catch (error) {
-    console.error("[AstraWay] WALK PREVIEW ERROR", error);
+    console.error("[AstraWay] INITIALIZATION ERROR", error);
 
     setStatus(
       "ОШИБКА: " + (error?.message || String(error))
@@ -347,31 +438,7 @@ async function loadCharacter() {
 }
 
 /*
- * CAMERA FOLLOW
- */
-
-function updateCamera() {
-  if (!characterRoot) return;
-
-  cameraOffset
-    .copy(forward)
-    .negate()
-    .multiplyScalar(4.2);
-
-  cameraOffset.y = 1.8;
-
-  camera.position
-    .copy(characterRoot.position)
-    .add(cameraOffset);
-
-  lookTarget.copy(characterRoot.position);
-  lookTarget.y += 0.95;
-
-  camera.lookAt(lookTarget);
-}
-
-/*
- * TAP → WORLD POSITION → MOVEMENT INTENT
+ * TAP → WORLD TARGET → NAVIGATION
  */
 
 const raycaster = new THREE.Raycaster();
@@ -402,10 +469,6 @@ function moveToScreenPoint(event) {
   const target = intersections[0].point.clone();
   target.y = 0;
 
-  /*
-   * Не даём задавать цель вплотную к текущей позиции.
-   */
-
   const distance = new THREE.Vector2(
     target.x - characterRoot.position.x,
     target.z - characterRoot.position.z
@@ -416,16 +479,12 @@ function moveToScreenPoint(event) {
     return;
   }
 
-  /*
-   * Маркер показывает именно выбранную точку.
-   */
-
   targetMarker.position.set(target.x, 0, target.z);
   targetMarker.visible = true;
 
   /*
-   * Донор получает только цель.
-   * Шаги и перенос веса рассчитывает сам.
+   * The library plans the route around the collider.
+   * We provide only the destination.
    */
 
   human.moveTo(target, {
@@ -433,14 +492,15 @@ function moveToScreenPoint(event) {
   });
 
   setStatus(
-    "ЦЕЛЬ ПРИНЯТА\n" +
-    `Расстояние: ${distance.toFixed(2)} м\n` +
-    "Процедурное движение"
+    "МАРШРУТ ПРИНЯТ\n" +
+    `До цели: ${distance.toFixed(2)} м\n` +
+    "Проверяю обход препятствия…"
   );
 
-  console.log("[AstraWay] MOVE INTENT", {
+  console.log("[AstraWay] NAVIGATION TARGET", {
     target: target.toArray(),
     distance,
+    obstacle: obstacleCollider,
   });
 }
 
@@ -455,8 +515,7 @@ canvas.addEventListener("pointerdown", (event) => {
 /*
  * FRAME LOOP
  *
- * Изолированный preview.
- * Production PoseWriter здесь не вызывается.
+ * Isolated preview. Production PoseWriter is untouched.
  */
 
 let lastFrameTime = performance.now();
