@@ -1,3 +1,4 @@
+
 {
   "name": "astraway-3d",
   "private": true,
@@ -11,7 +12,8 @@
   "dependencies": {
     "@three-ws/retarget": "^0.1.2",
     "closed-chain-ik": "github:gkjohnson/closed-chain-ik-js",
-    "three": "^0.169.0"
+    "three": "^0.169.0",
+    "three-procedural-locomotion": "github:PabloMesquida/three-procedural-locomotion#v0.3.0"
   },
   "devDependencies": {
     "vite": "^5.4.0"
