@@ -1,13 +1,14 @@
 
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="UTF-8" />
   <meta
     name="viewport"
     content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
   />
-  <title>AstraWay Character Lab v2</title>
+  <title>AstraWay — Walking Preview</title>
+
   <style>
     html, body {
       margin: 0;
@@ -17,7 +18,7 @@
       overflow: hidden;
       background: #090b10;
       color: #fff;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     }
 
     #viewer {
@@ -31,219 +32,21 @@
       left: 8px;
       right: 8px;
       bottom: 8px;
-      padding: 8px 10px;
-      background: rgba(0, 0, 0, 0.72);
-      border-radius: 8px;
-      font-size: 11px;
-      line-height: 1.35;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      color: #d7e1ff;
-      white-space: pre-wrap;
-      word-break: break-word;
-      pointer-events: none;
-      z-index: 10;
-    }
-
-    #probe-debug {
-      position: fixed;
-      top: 8px;
-      left: 8px;
-      right: 8px;
-      max-height: 43vh;
-      overflow: auto;
       padding: 10px;
-      background: rgba(8, 12, 20, 0.96);
-      border: 1px solid #4d86a8;
+      background: rgba(0, 0, 0, 0.75);
       border-radius: 8px;
-      color: #d8f5ff;
-      z-index: 10000;
-      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #d7e1ff;
+      font: 12px/1.4 monospace;
       white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      -webkit-overflow-scrolling: touch;
-    }
-
-    #probe-debug-header {
-      position: sticky;
-      top: -10px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      padding: 5px 0 8px;
-      background: #080c14;
-      border-bottom: 1px solid #34556b;
-      margin-bottom: 7px;
-    }
-
-    #probe-debug-title {
-      font-weight: 700;
-      color: #7de6b1;
-    }
-
-    .probe-button {
-      border: 1px solid #62849a;
-      border-radius: 5px;
-      padding: 6px 9px;
-      background: #172a38;
-      color: white;
-      font-size: 12px;
-      touch-action: manipulation;
-    }
-
-    #probe-debug-output {
-      margin: 0;
-      max-height: 300px;
-      overflow: auto;
-      white-space: pre-wrap;
-      word-break: break-all;
-      -webkit-overflow-scrolling: touch;
-    }
-
-    #probe-debug-help {
-      color: #9eb3c2;
-      margin-top: 7px;
+      pointer-events: none;
     }
   </style>
 </head>
+
 <body>
   <canvas id="viewer"></canvas>
-  <div id="status">AstraWay — загрузка…</div>
+  <div id="status">AstraWay — загрузка персонажа…</div>
 
-  <div id="probe-debug">
-    <div id="probe-debug-header">
-      <span id="probe-debug-title">AstraWay PROBE DEBUG</span>
-      <div>
-        <button id="probe-copy" class="probe-button" type="button">Копировать</button>
-        <button id="probe-clear" class="probe-button" type="button">Очистить</button>
-      </div>
-    </div>
-    <pre id="probe-debug-output">Ожидание probeDump…
-Если данные не появятся, проверь, что открыта свежая версия игры.</pre>
-    <div id="probe-debug-help">Здесь отображаются реальные console.log</div>
-  </div>
-
-  <script>
-    (() => {
-      const output = document.getElementById("probe-debug-output");
-      const copyButton = document.getElementById("probe-copy");
-      const clearButton = document.getElementById("probe-clear");
-
-      const originalLog = console.log.bind(console);
-      const lines = [];
-      const MAX_LINES = 200;
-
-      let activeBone = null;
-      let remainingProbes = 0;
-
-      function render() {
-        output.textContent = lines.length
-          ? lines.join("\n")
-          : "Ожидание probeDump…";
-      }
-
-      function appendLine(message) {
-        lines.push(String(message));
-
-        if (lines.length > MAX_LINES) {
-          lines.splice(0, lines.length - MAX_LINES);
-        }
-
-        render();
-      }
-
-      function formatArgs(args) {
-        return args.map((value) => {
-          if (typeof value === "string") return value;
-
-          try {
-            return JSON.stringify(value);
-          } catch (_) {
-            return String(value);
-          }
-        }).join(" ");
-      }
-
-      console.log = function (...args) {
-        originalLog(...args);
-
-        const message = formatArgs(args);
-
-        if (message.includes("[AstraWay] TERRAIN PERCEPTION")) {
-          appendLine(message);
-          return;
-        }
-
-        if (message.includes("[AstraWay:probeDump]")) {
-          const boneMatch = message.match(/bone=(foot_L|foot_R)/);
-          const countMatch = message.match(/probeCount=(\d+)/);
-
-          if (boneMatch) {
-            activeBone = boneMatch[1];
-            remainingProbes = countMatch ? Number(countMatch[1]) : 0;
-          } else {
-            activeBone = null;
-            remainingProbes = 0;
-          }
-
-          appendLine(message);
-          return;
-        }
-
-        if (
-          activeBone &&
-          remainingProbes > 0 &&
-          message.startsWith(activeBone + "[")
-        ) {
-          appendLine(message);
-          remainingProbes--;
-
-          if (remainingProbes === 0) {
-            activeBone = null;
-          }
-        }
-      };
-
-      copyButton.addEventListener("click", () => {
-        const area = document.createElement("textarea");
-        area.value = lines.join("\n");
-        area.setAttribute("readonly", "");
-        area.style.position = "fixed";
-        area.style.opacity = "0";
-        document.body.appendChild(area);
-        area.select();
-
-        try {
-          document.execCommand("copy");
-        } finally {
-          area.remove();
-        }
-      });
-
-      clearButton.addEventListener("click", () => {
-        lines.length = 0;
-        activeBone = null;
-        remainingProbes = 0;
-        render();
-      });
-
-      window.addEventListener("error", (event) => {
-        appendLine(
-          "[PAGE ERROR] " +
-          (event.message || "unknown error") +
-          " " +
-          (event.filename || "") +
-          ":" +
-          (event.lineno || "")
-        );
-      });
-
-      window.addEventListener("unhandledrejection", (event) => {
-        appendLine("[PROMISE ERROR] " + String(event.reason));
-      });
-    })();
-  </script>
-
-  <script type="module" src="/src/main.js"></script>
+  <script type="module" src="/src/walk-preview.js"></script>
 </body>
 </html>
