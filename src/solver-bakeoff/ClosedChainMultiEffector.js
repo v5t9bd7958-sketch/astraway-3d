@@ -1,68 +1,33 @@
+
+import * as THREE from "three";
+
 import {
-  Solver,
-  Link,
-  Joint,
-  Goal,
-  DOF,
-  SOLVE_STATUS,
-  SOLVE_STATUS_NAMES,
-} from "closed-chain-ik";
+  Constraint,
+  CONSTRAINT_TYPE,
+} from "../character/Constraint.js";
 
-import { Vector3 } from "three";
+import {
+  ConstraintSet,
+} from "../character/ConstraintSet.js";
 
-const GOAL_ERROR_THRESHOLD = 0.012;
-const FOOT_DRIFT_THRESHOLD = 0.02;
-const STABILITY_THRESHOLD = 0.008;
-const FRAME_COUNT = 30;
+import {
+  ConstraintSolver,
+} from "../character/ConstraintSolver.js";
 
-const TOPOLOGY = {
-  Hips: null,
+import {
+  PoseWriter,
+} from "../character/PoseWriter.js";
 
-  Spine: "Hips",
-  Spine1: "Spine",
-  Spine2: "Spine1",
-  Neck: "Spine2",
-  Head: "Neck",
+const FRAME_COUNT = 60;
+const MOVE_FRAMES = 30;
 
-  LeftUpLeg: "Hips",
-  LeftLeg: "LeftUpLeg",
-  LeftFoot: "LeftLeg",
-
-  RightUpLeg: "Hips",
-  RightLeg: "RightUpLeg",
-  RightFoot: "RightLeg",
-
-  LeftShoulder: "Spine2",
-  LeftArm: "LeftShoulder",
-  LeftForeArm: "LeftArm",
-  LeftHand: "LeftForeArm",
-
-  RightShoulder: "Spine2",
-  RightArm: "RightShoulder",
-  RightForeArm: "RightArm",
-  RightHand: "RightForeArm",
-};
+const MAX_ANCHOR_DRIFT = 0.02;
+const MAX_SWING_ERROR = 0.025;
 
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
-}
-
-function distance3(a, b) {
-  return Math.hypot(
-    a[0] - b[0],
-    a[1] - b[1],
-    a[2] - b[2],
-  );
-}
-
-function add3(a, b) {
-  return new Float32Array([
-    a[0] + b[0],
-    a[1] + b[1],
-    a[2] + b[2],
-  ]);
 }
 
 function format(value, digits = 5) {
@@ -71,702 +36,326 @@ function format(value, digits = 5) {
     : "NaN";
 }
 
-function statusName(status) {
-  return (
-    SOLVE_STATUS_NAMES?.[status] ??
-    Object.entries(SOLVE_STATUS).find(
-      ([, value]) => value === status
-    )?.[0] ??
-    `UNKNOWN(${status})`
-  );
-}
+function updateWorld(skeleton) {
+  const first = skeleton?.bones?.[0];
 
-function getBoneMap(skeleton) {
-  const map = new Map(
-    skeleton.bones.map(
-      (bone) => [bone.name, bone]
-    )
-  );
+  assert(first, "Gate 8B: skeleton has no bones.");
 
-  for (const name of Object.keys(TOPOLOGY)) {
-    assert(
-      map.has(name),
-      `Gate 8B: XBot bone "${name}" not found.`
-    );
-  }
+  let top = first;
 
-  return map;
-}
-
-function verifyTopology(map) {
-  for (
-    const [childName, parentName]
-    of Object.entries(TOPOLOGY)
+  while (
+    top.parent &&
+    top.parent.isObject3D
   ) {
-    if (!parentName) {
-      continue;
-    }
-
-    const actual =
-      map.get(childName).parent?.name;
-
-    assert(
-      actual === parentName,
-      `Gate 8B: topology mismatch: ${childName}.parent=${actual}, expected ${parentName}.`
-    );
-  }
-}
-
-function readWorldPositions(map) {
-  const temp = new Vector3();
-  const result = {};
-
-  for (const name of Object.keys(TOPOLOGY)) {
-    map.get(name).getWorldPosition(temp);
-
-    result[name] =
-      new Float32Array([
-        temp.x,
-        temp.y,
-        temp.z,
-      ]);
+    top = top.parent;
   }
 
-  return result;
+  top.updateMatrixWorld(true);
 }
 
-function createJoint(
-  parentLink,
-  worldPosition,
-  dof
-) {
-  const joint = new Joint();
-
-  joint.setDoF(...dof);
-
-  parentLink.addChild(joint);
-
-  joint.setWorldPosition(
-    worldPosition[0],
-    worldPosition[1],
-    worldPosition[2]
+function findBone(skeleton, name) {
+  const bone = skeleton.bones.find(
+    (item) => item?.name === name
   );
 
-  return joint;
+  assert(
+    bone,
+    `Gate 8B: bone "${name}" not found.`
+  );
+
+  return bone;
 }
 
-function createSegment(
-  joint,
-  worldPosition
-) {
-  const link = new Link();
-
-  joint.addChild(link);
-
-  link.setWorldPosition(
-    worldPosition[0],
-    worldPosition[1],
-    worldPosition[2]
+function readPosition(bone) {
+  return bone.getWorldPosition(
+    new THREE.Vector3()
   );
-
-  return link;
 }
 
-function makeGoal(
-  link,
-  target
-) {
-  const goal = new Goal();
-
-  goal.setGoalDoF(
-    DOF.X,
-    DOF.Y,
-    DOF.Z
-  );
-
-  goal.setWorldPosition(
-    target[0],
-    target[1],
-    target[2]
-  );
-
-  goal.makeClosure(link);
-
-  return goal;
+function capturePose(skeleton) {
+  return skeleton.bones.map((bone) => ({
+    bone,
+    quaternion: bone.quaternion.clone(),
+  }));
 }
 
-function setGenerousLimits(
-  joint,
-  min,
-  max
-) {
-  joint.setMinLimits(...min);
-  joint.setMaxLimits(...max);
-
-  joint.setRestPoseValues(
-    ...joint.dof.map(() => 0)
-  );
-
-  joint.restPoseSet = true;
-}
-
-function buildModel(skeleton) {
-  const bones =
-    getBoneMap(skeleton);
-
-  verifyTopology(bones);
-
-  const p =
-    readWorldPositions(bones);
-
-  /*
-   * ONE BODY.
-   *
-   * The root is shared by every effector.
-   * Translation + rotation are deliberately enabled
-   * so the solver can move the body when the targets
-   * demand it.
-   */
-
-  const root = new Joint();
-
-  root.setDoF(
-    DOF.X,
-    DOF.Y,
-    DOF.Z,
-    DOF.EX,
-    DOF.EY,
-    DOF.EZ
-  );
-
-  root.setWorldPosition(
-    p.Hips[0],
-    p.Hips[1],
-    p.Hips[2]
-  );
-
-  root.setMinLimits(
-    -0.18,
-    -0.18,
-    -0.18,
-    -0.55,
-    -0.55,
-    -0.55
-  );
-
-  root.setMaxLimits(
-    0.18,
-    0.18,
-    0.18,
-    0.55,
-    0.55,
-    0.55
-  );
-
-  root.setRestPoseValues(
-    0,
-    0,
-    0,
-    0,
-    0,
-    0
-  );
-
-  root.restPoseSet = true;
-
-  const pelvis =
-    new Link();
-
-  root.addChild(pelvis);
-
-  pelvis.setPosition(
-    0,
-    0,
-    0
-  );
-
-  const goals = {};
-  const joints = {};
-
-  /*
-   * -----------------------------
-   * SPINE
-   * -----------------------------
-   */
-
-  joints.spine =
-    createJoint(
-      pelvis,
-      p.Spine,
-      [DOF.EX, DOF.EY, DOF.EZ]
+function restorePose(snapshot, skeleton) {
+  for (const item of snapshot) {
+    item.bone.quaternion.copy(
+      item.quaternion
     );
-
-  const spineLink =
-    createSegment(
-      joints.spine,
-      p.Spine1
-    );
-
-  joints.spine1 =
-    createJoint(
-      spineLink,
-      p.Spine2,
-      [DOF.EX, DOF.EY, DOF.EZ]
-    );
-
-  const chest =
-    createSegment(
-      joints.spine1,
-      p.Spine2
-    );
-
-  /*
-   * -----------------------------
-   * NECK / HEAD
-   * -----------------------------
-   */
-
-  joints.neck =
-    createJoint(
-      chest,
-      p.Neck,
-      [DOF.EX, DOF.EY, DOF.EZ]
-    );
-
-  const neckLink =
-    createSegment(
-      joints.neck,
-      p.Head
-    );
-
-  goals.head =
-    makeGoal(
-      neckLink,
-      p.Head
-    );
-
-  /*
-   * -----------------------------
-   * LEGS
-   * -----------------------------
-   */
-
-  for (const side of [
-    "Left",
-    "Right",
-  ]) {
-    const hipName =
-      `${side}UpLeg`;
-
-    const kneeName =
-      `${side}Leg`;
-
-    const footName =
-      `${side}Foot`;
-
-    const key =
-      side.toLowerCase();
-
-    joints[`${key}Hip`] =
-      createJoint(
-        pelvis,
-        p[hipName],
-        [DOF.EX, DOF.EY, DOF.EZ]
-      );
-
-    setGenerousLimits(
-      joints[`${key}Hip`],
-      [-1.2, -1.2, -1.2],
-      [1.2, 1.2, 1.2]
-    );
-
-    const thigh =
-      createSegment(
-        joints[`${key}Hip`],
-        p[kneeName]
-      );
-
-    joints[`${key}Knee`] =
-      createJoint(
-        thigh,
-        p[kneeName],
-        [DOF.EX, DOF.EY, DOF.EZ]
-      );
-
-    setGenerousLimits(
-      joints[`${key}Knee`],
-      [-1.7, -1.0, -1.0],
-      [1.7, 1.0, 1.0]
-    );
-
-    const shin =
-      createSegment(
-        joints[`${key}Knee`],
-        p[footName]
-      );
-
-    goals[`${key}Foot`] =
-      makeGoal(
-        shin,
-        p[footName]
-      );
   }
 
+  updateWorld(skeleton);
+}
+
+function getForward(skeleton) {
+  const hips = findBone(
+    skeleton,
+    "Hips"
+  );
+
+  const quaternion =
+    hips.getWorldQuaternion(
+      new THREE.Quaternion()
+    );
+
+  const forward =
+    new THREE.Vector3(0, 0, 1)
+      .applyQuaternion(quaternion)
+      .setY(0);
+
+  if (forward.lengthSq() < 1e-8) {
+    forward.set(0, 0, 1);
+  }
+
+  return forward.normalize();
+}
+
+function makeConstraint({
+  id,
+  bone,
+  target,
+  hard,
+  priority,
+}) {
+  return new Constraint({
+    id,
+
+    type:
+      CONSTRAINT_TYPE.POSITION,
+
+    source:
+      id,
+
+    target,
+
+    priority,
+
+    weight: 1,
+
+    hard,
+
+    enabled: true,
+
+    tolerance: 0.005,
+
+    metadata: {
+      bone: bone.name,
+
+      effectorPosition:
+        target.toArray(),
+
+      isSupport: hard,
+    },
+  });
+}
+
+function runTrial({
+  skeleton,
+  anchorBone,
+  swingBone,
+  baseline,
+  forward,
+}) {
+  restorePose(
+    baseline,
+    skeleton
+  );
+
+  updateWorld(skeleton);
+
+  const anchorStart =
+    readPosition(anchorBone);
+
+  const swingStart =
+    readPosition(swingBone);
+
+  const anchorTarget =
+    anchorStart.clone();
+
+  const swingEnd =
+    swingStart.clone()
+      .addScaledVector(forward, 0.07)
+      .add(new THREE.Vector3(0, 0.06, 0));
+
   /*
-   * -----------------------------
-   * ARMS
-   * -----------------------------
+   * HARD anchor is inserted first.
    *
    * IMPORTANT:
-   *
-   * They attach to Spine2 / chest.
-   * NOT to Hips.
+   * Current ConstraintSolver does not implement
+   * mathematical HARD/SOFT hierarchy.
+   * This test measures actual combined behavior.
    */
 
-  for (const side of [
-    "Left",
-    "Right",
-  ]) {
-    const shoulderName =
-      `${side}Shoulder`;
+  const anchorConstraint =
+    makeConstraint({
+      id: "gate8b:planted",
+      bone: anchorBone,
+      target: anchorTarget,
+      hard: true,
+      priority: 100,
+    });
 
-    const armName =
-      `${side}Arm`;
+  const swingConstraint =
+    makeConstraint({
+      id: "gate8b:swing",
+      bone: swingBone,
+      target: swingStart,
+      hard: false,
+      priority: 50,
+    });
 
-    const foreArmName =
-      `${side}ForeArm`;
+  const constraints =
+    new ConstraintSet();
 
-    const handName =
-      `${side}Hand`;
-
-    const key =
-      side.toLowerCase();
-
-    joints[`${key}Shoulder`] =
-      createJoint(
-        chest,
-        p[shoulderName],
-        [DOF.EX, DOF.EY, DOF.EZ]
-      );
-
-    setGenerousLimits(
-      joints[`${key}Shoulder`],
-      [-1.5, -1.5, -1.5],
-      [1.5, 1.5, 1.5]
-    );
-
-    const upperArm =
-      createSegment(
-        joints[`${key}Shoulder`],
-        p[armName]
-      );
-
-    joints[`${key}Elbow`] =
-      createJoint(
-        upperArm,
-        p[foreArmName],
-        [DOF.EX, DOF.EY, DOF.EZ]
-      );
-
-    setGenerousLimits(
-      joints[`${key}Elbow`],
-      [-1.7, -1.0, -1.0],
-      [1.7, 1.0, 1.0]
-    );
-
-    const foreArm =
-      createSegment(
-        joints[`${key}Elbow`],
-        p[handName]
-      );
-
-    goals[`${key}Hand`] =
-      makeGoal(
-        foreArm,
-        p[handName]
-      );
-  }
+  constraints.add(anchorConstraint);
+  constraints.add(swingConstraint);
 
   const solver =
-    new Solver(root);
+    new ConstraintSolver({
+      skeleton,
+      damping: 0.12,
+      maxAngleStep: 0.20,
+      positionTolerance: 0.005,
+      enabled: true,
+    });
 
-  solver.maxIterations = 40;
-  solver.translationConvergeThreshold = 1e-4;
-  solver.translationFactor = 1;
-  solver.dampingFactor = 0.03;
-  solver.restPoseFactor = 0.01;
+  const writer =
+    new PoseWriter({
+      skeleton,
+      enabled: true,
+      maxRotationPerBone: 0.18,
+    });
 
-  solver.updateStructure();
-
-  return {
-    root,
-    pelvis,
-    chest,
-    goals,
-    joints,
-    solver,
-    source: p,
-  };
-}
-
-function getGoalPosition(goal) {
-  const out =
-    new Float32Array(3);
-
-  goal.getWorldPosition(out);
-
-  return out;
-}
-
-function getEffectorPosition(link) {
-  const out =
-    new Float32Array(3);
-
-  link.getWorldPosition(out);
-
-  return out;
-}
-
-function getRootPosition(root) {
-  const out =
-    new Float32Array(3);
-
-  root.getWorldPosition(out);
-
-  return out;
-}
-
-function snapshotEffectors(model) {
-  return {
-    leftFoot:
-      getEffectorPosition(
-        model.goals.leftFoot.child
-      ),
-
-    rightFoot:
-      getEffectorPosition(
-        model.goals.rightFoot.child
-      ),
-
-    leftHand:
-      getEffectorPosition(
-        model.goals.leftHand.child
-      ),
-
-    rightHand:
-      getEffectorPosition(
-        model.goals.rightHand.child
-      ),
-
-    head:
-      getEffectorPosition(
-        model.goals.head.child
-      ),
-  };
-}
-
-function errorReport(model) {
-  const report = {};
+  let maxAnchorDrift = 0;
+  let maxSwingError = 0;
+  let totalWrites = 0;
+  let lastSolverStatus = "not-run";
 
   for (
-    const [name, goal]
-    of Object.entries(model.goals)
+    let frame = 0;
+    frame < FRAME_COUNT;
+    frame++
   ) {
-    const actual =
-      getEffectorPosition(
-        goal.child
+    updateWorld(skeleton);
+
+    /*
+     * Refresh actual effector positions.
+     *
+     * This reproduces the feedback principle
+     * used by BodyStateBinder:
+     * measured position is not a frozen input.
+     */
+
+    anchorConstraint.metadata.effectorPosition =
+      readPosition(anchorBone).toArray();
+
+    swingConstraint.metadata.effectorPosition =
+      readPosition(swingBone).toArray();
+
+    const progress = Math.min(
+      1,
+      (frame + 1) / MOVE_FRAMES
+    );
+
+    const currentTarget =
+      swingStart.clone().lerp(
+        swingEnd,
+        progress
       );
 
-    const target =
-      getGoalPosition(goal);
-
-    report[name] = {
-      actual,
-      target,
-      error:
-        distance3(
-          actual,
-          target
-        ),
-    };
-  }
-
-  return report;
-}
-
-function setTarget(
-  goal,
-  target
-) {
-  goal.setWorldPosition(
-    target[0],
-    target[1],
-    target[2]
-  );
-}
-
-function solve(model) {
-  const started =
-    performance.now();
-
-  const statuses =
-    model.solver.solve();
-
-  const timeMs =
-    performance.now() - started;
-
-  const errors =
-    errorReport(model);
-
-  const maxError =
-    Math.max(
-      ...Object.values(errors)
-        .map(
-          (value) => value.error
-        )
+    swingConstraint.target.copy(
+      currentTarget
     );
 
-  return {
-    statuses,
-    status:
-      statuses[0],
-    statusName:
-      statusName(statuses[0]),
-    timeMs,
-    errors,
-    maxError,
-  };
-}
+    const solverResult =
+      solver.solve(constraints);
 
-function buildTargets(source) {
-  return {
-    leftFoot:
-      add3(
-        source.LeftFoot,
-        new Float32Array([
-          0.08,
-          0.02,
-          0.02,
-        ])
-      ),
+    lastSolverStatus =
+      solverResult.status;
 
-    rightFoot:
-      add3(
-        source.RightFoot,
-        new Float32Array([
-          -0.08,
-          0.02,
-          0.02,
-        ])
-      ),
+    const writeResult =
+      writer.write(solverResult);
 
-    leftHand:
-      add3(
-        source.LeftHand,
-        new Float32Array([
-          0.10,
-          0.05,
-          0.12,
-        ])
-      ),
+    totalWrites +=
+      writeResult.applied || 0;
 
-    rightHand:
-      add3(
-        source.RightHand,
-        new Float32Array([
-          -0.10,
-          0.05,
-          0.12,
-        ])
-      ),
+    updateWorld(skeleton);
 
-    head:
-      add3(
-        source.Head,
-        new Float32Array([
-          0.02,
-          0.04,
-          0.02,
-        ])
-      ),
-  };
-}
+    const anchorNow =
+      readPosition(anchorBone);
 
-function setAllTargets(
-  model,
-  targets
-) {
-  for (
-    const [name, target]
-    of Object.entries(targets)
-  ) {
-    setTarget(
-      model.goals[name],
-      target
-    );
-  }
-}
+    const swingNow =
+      readPosition(swingBone);
 
-function frameStability(
-  model,
-  count
-) {
-  let peakError = 0;
-  let jitter = 0;
+    const anchorDrift =
+      anchorNow.distanceTo(
+        anchorTarget
+      );
 
-  let previous =
-    snapshotEffectors(model);
+    const swingError =
+      swingNow.distanceTo(
+        currentTarget
+      );
 
-  let totalMs = 0;
-
-  const statuses = [];
-
-  for (
-    let i = 0;
-    i < count;
-    i++
-  ) {
-    const result =
-      solve(model);
-
-    statuses.push(
-      result.statusName
-    );
-
-    totalMs +=
-      result.timeMs;
-
-    peakError =
+    maxAnchorDrift =
       Math.max(
-        peakError,
-        result.maxError
+        maxAnchorDrift,
+        anchorDrift
       );
 
-    const current =
-      snapshotEffectors(model);
-
-    for (
-      const name of Object.keys(current)
-    ) {
-      jitter =
-        Math.max(
-          jitter,
-          distance3(
-            current[name],
-            previous[name]
-          )
-        );
-    }
-
-    previous = current;
+    maxSwingError =
+      Math.max(
+        maxSwingError,
+        swingError
+      );
   }
 
+  updateWorld(skeleton);
+
+  const finalAnchorDrift =
+    readPosition(anchorBone)
+      .distanceTo(anchorTarget);
+
+  const finalSwingError =
+    readPosition(swingBone)
+      .distanceTo(swingEnd);
+
+  const finite =
+    Number.isFinite(maxAnchorDrift) &&
+    Number.isFinite(maxSwingError) &&
+    Number.isFinite(finalAnchorDrift) &&
+    Number.isFinite(finalSwingError);
+
+  const anchorProtected =
+    finite &&
+    maxAnchorDrift <= MAX_ANCHOR_DRIFT;
+
+  const swingReached =
+    finite &&
+    finalSwingError <= MAX_SWING_ERROR;
+
   return {
-    peakError,
-    jitter,
-    avgTimeMs:
-      totalMs / count,
-    statuses,
+    anchorBone: anchorBone.name,
+    swingBone: swingBone.name,
+
+    maxAnchorDrift,
+    finalAnchorDrift,
+
+    maxSwingError,
+    finalSwingError,
+
+    totalWrites,
+    lastSolverStatus,
+
+    anchorProtected,
+    swingReached,
+
+    green:
+      anchorProtected &&
+      swingReached &&
+      totalWrites > 0,
   };
 }
 
@@ -779,222 +368,110 @@ export function runClosedChainMultiEffector({
     "Gate 8B: valid THREE.Skeleton required."
   );
 
-  /*
-   * Build ONE connected kinematic tree.
-   */
+  const leftFoot =
+    findBone(skeleton, "LeftFoot");
 
-  const model =
-    buildModel(skeleton);
+  const rightFoot =
+    findBone(skeleton, "RightFoot");
 
-  const targets =
-    buildTargets(
-      model.source
+  const baseline =
+    capturePose(skeleton);
+
+  const forward =
+    getForward(skeleton);
+
+  let leftAnchor;
+  let rightAnchor;
+
+  try {
+    leftAnchor = runTrial({
+      skeleton,
+      anchorBone: leftFoot,
+      swingBone: rightFoot,
+      baseline,
+      forward,
+    });
+
+    rightAnchor = runTrial({
+      skeleton,
+      anchorBone: rightFoot,
+      swingBone: leftFoot,
+      baseline,
+      forward,
+    });
+  } finally {
+    /*
+     * Diagnostic must not leave the live
+     * character in a modified pose.
+     */
+    restorePose(
+      baseline,
+      skeleton
     );
-
-  setAllTargets(
-    model,
-    targets
-  );
-
-  /*
-   * Phase 1:
-   *
-   * Five effectors simultaneously.
-   */
-
-  const initial =
-    solve(model);
-
-  const stability =
-    frameStability(
-      model,
-      FRAME_COUNT
-    );
-
-  /*
-   * Phase 2:
-   *
-   * Change ONLY the hands.
-   *
-   * Feet and head remain constrained.
-   *
-   * This is the critical coupling test.
-   */
-
-  const feetBefore = {
-    left:
-      getEffectorPosition(
-        model.goals.leftFoot.child
-      ),
-
-    right:
-      getEffectorPosition(
-        model.goals.rightFoot.child
-      ),
-  };
-
-  setTarget(
-    model.goals.leftHand,
-    add3(
-      targets.leftHand,
-      new Float32Array([
-        0.08,
-        0.04,
-        0.05,
-      ])
-    )
-  );
-
-  setTarget(
-    model.goals.rightHand,
-    add3(
-      targets.rightHand,
-      new Float32Array([
-        -0.08,
-        0.04,
-        0.05,
-      ])
-    )
-  );
-
-  const retarget =
-    solve(model);
-
-  const retargetStability =
-    frameStability(
-      model,
-      FRAME_COUNT
-    );
-
-  const feetAfter = {
-    left:
-      getEffectorPosition(
-        model.goals.leftFoot.child
-      ),
-
-    right:
-      getEffectorPosition(
-        model.goals.rightFoot.child
-      ),
-  };
-
-  const leftFootDrift =
-    distance3(
-      feetBefore.left,
-      feetAfter.left
-    );
-
-  const rightFootDrift =
-    distance3(
-      feetBefore.right,
-      feetAfter.right
-    );
-
-  const footDrift =
-    Math.max(
-      leftFootDrift,
-      rightFootDrift
-    );
-
-  const allFinite =
-    Object.values(
-      retarget.errors
-    ).every(
-      (entry) =>
-        Number.isFinite(
-          entry.error
-        )
-    );
-
-  const initialPass =
-    initial.status ===
-      SOLVE_STATUS.CONVERGED &&
-    initial.maxError <=
-      GOAL_ERROR_THRESHOLD;
-
-  const stabilityPass =
-    stability.peakError <=
-      GOAL_ERROR_THRESHOLD &&
-    stability.jitter <=
-      STABILITY_THRESHOLD;
-
-  const retargetPass =
-    retarget.status ===
-      SOLVE_STATUS.CONVERGED &&
-    retarget.maxError <=
-      GOAL_ERROR_THRESHOLD;
-
-  const feetProtected =
-    footDrift <=
-    FOOT_DRIFT_THRESHOLD;
+  }
 
   const green =
-    allFinite &&
-    initialPass &&
-    stabilityPass &&
-    retargetPass &&
-    feetProtected &&
-    retargetStability.peakError <=
-      GOAL_ERROR_THRESHOLD &&
-    retargetStability.jitter <=
-      STABILITY_THRESHOLD;
+    leftAnchor.green &&
+    rightAnchor.green;
 
   const lines = [
-    "=== AstraWay Closed-Chain IK Gate 8B ===",
+    "=== AstraWay REAL Solver / PoseWriter Gate 8B ===",
 
-    `TOPOLOGY: VERIFIED | bones=${Object.keys(TOPOLOGY).length}`,
+    "MODE: isolated diagnostic",
 
-    `INITIAL: ${initial.statusName} | maxError=${format(initial.maxError)} | ${format(initial.timeMs, 2)} ms`,
+    "EFFECTOR: foot bone origin proxy",
 
-    `STABILITY 30: peakError=${format(stability.peakError)} | jitter=${format(stability.jitter)} | avg=${format(stability.avgTimeMs, 2)} ms`,
+    "HARD/SOFT: metadata only; no hierarchy implementation",
 
-    `RETARGET: ${retarget.statusName} | maxError=${format(retarget.maxError)} | footDrift=${format(footDrift)}`,
+    "",
 
-    `RETARGET 30: peakError=${format(retargetStability.peakError)} | jitter=${format(retargetStability.jitter)} | avg=${format(retargetStability.avgTimeMs, 2)} ms`,
+    "LEFT ANCHOR / RIGHT SWING",
 
-    `LEFT_FOOT: error=${format(retarget.errors.leftFoot.error)}`,
+    `ANCHOR DRIFT: max=${format(leftAnchor.maxAnchorDrift)} | final=${format(leftAnchor.finalAnchorDrift)}`,
 
-    `RIGHT_FOOT: error=${format(retarget.errors.rightFoot.error)}`,
+    `SWING ERROR: max=${format(leftAnchor.maxSwingError)} | final=${format(leftAnchor.finalSwingError)}`,
 
-    `LEFT_HAND: error=${format(retarget.errors.leftHand.error)}`,
+    `WRITES: ${leftAnchor.totalWrites} | solver=${leftAnchor.lastSolverStatus}`,
 
-    `RIGHT_HAND: error=${format(retarget.errors.rightHand.error)}`,
+    `RESULT: ${leftAnchor.green ? "GREEN" : "RED"}`,
 
-    `HEAD: error=${format(retarget.errors.head.error)}`,
+    "",
 
-    `FEET_PROTECTED: ${feetProtected} | leftDrift=${format(leftFootDrift)} | rightDrift=${format(rightFootDrift)}`,
+    "RIGHT ANCHOR / LEFT SWING",
+
+    `ANCHOR DRIFT: max=${format(rightAnchor.maxAnchorDrift)} | final=${format(rightAnchor.finalAnchorDrift)}`,
+
+    `SWING ERROR: max=${format(rightAnchor.maxSwingError)} | final=${format(rightAnchor.finalSwingError)}`,
+
+    `WRITES: ${rightAnchor.totalWrites} | solver=${rightAnchor.lastSolverStatus}`,
+
+    `RESULT: ${rightAnchor.green ? "GREEN" : "RED"}`,
+
+    "",
 
     `FINAL: ${green ? "GATE 8B GREEN" : "GATE 8B RED"}`,
   ];
 
-  const text =
+  const output =
     lines.join("\n");
 
   if (statusElement) {
     statusElement.textContent =
-      text;
+      output;
   }
 
-  console.log(text);
+  console.log(output);
 
   console.table({
-    topology: true,
-    initial: initialPass,
-    stability30: stabilityPass,
-    retarget: retargetPass,
-    feetProtected,
+    leftAnchor: leftAnchor.green,
+    rightAnchor: rightAnchor.green,
     gate8B: green,
   });
 
   return {
     green,
-    topology: true,
-    initial,
-    stability,
-    retarget,
-    retargetStability,
-    footDrift,
-    feetProtected,
+    leftAnchor,
+    rightAnchor,
   };
 }
 
