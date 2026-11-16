@@ -4,17 +4,14 @@ import * as THREE from "three";
 /**
  * AstraWay ConstraintSolver
  *
- * Responsibilities:
- * - Resolve positional constraints into world-space bone rotations.
- * - Process HARD constraints before SOFT constraints.
- * - Respect priority ordering.
- * - Apply SOFT weights.
- * - Return deltaPose for the single production PoseWriter.
+ * Converts world-space positional constraints
+ * into bounded world-space bone rotations.
  *
- * This is a damped least-squares positional solver.
- * It performs one bounded correction pass per frame.
+ * HARD constraints are processed before SOFT.
+ * SOFT constraints respect their weight.
  *
- * It does NOT write bones.
+ * This solver NEVER writes bones.
+ * PoseWriter remains the only production bone writer.
  */
 
 export class ConstraintSolver {
@@ -26,22 +23,9 @@ export class ConstraintSolver {
     enabled = true,
   } = {}) {
     this.skeleton = skeleton;
-
-    this.damping = Math.max(
-      0.000001,
-      Number(damping) || 0.12
-    );
-
-    this.maxAngleStep = Math.max(
-      0.0001,
-      Number(maxAngleStep) || 0.20
-    );
-
-    this.positionTolerance = Math.max(
-      0,
-      Number(positionTolerance) || 0.005
-    );
-
+    this.damping = Math.max(0.000001, Number(damping) || 0.12);
+    this.maxAngleStep = Math.max(0.0001, Number(maxAngleStep) || 0.20);
+    this.positionTolerance = Math.max(0, Number(positionTolerance) || 0.005);
     this.enabled = Boolean(enabled);
 
     this.solveCount = 0;
@@ -59,70 +43,26 @@ export class ConstraintSolver {
     return this;
   }
 
-  solve(constraintSet, {
-    skeleton = this.skeleton,
-  } = {}) {
+  solve(constraintSet, { skeleton = this.skeleton } = {}) {
     const start = performance.now();
-
     this.solveCount++;
 
     if (!this.enabled) {
-      return this._finish({
-        status: "disabled",
-        solved: false,
-        constraints: 0,
-        solvedConstraints: 0,
-        unsupportedConstraints: 0,
-        deltaPose: [],
-        maxError: 0,
-        totalDelta: 0,
-        solveTime: performance.now() - start,
-      });
+      return this._finish("disabled", false, [], 0, 0, 0, 0, start);
     }
 
     if (!skeleton) {
-      return this._finish({
-        status: "no-skeleton",
-        solved: false,
-        constraints: 0,
-        solvedConstraints: 0,
-        unsupportedConstraints: 0,
-        deltaPose: [],
-        maxError: 0,
-        totalDelta: 0,
-        solveTime: performance.now() - start,
-      });
+      return this._finish("no-skeleton", false, [], 0, 0, 0, 0, start);
     }
 
     if (!constraintSet) {
-      return this._finish({
-        status: "no-constraints",
-        solved: true,
-        constraints: 0,
-        solvedConstraints: 0,
-        unsupportedConstraints: 0,
-        deltaPose: [],
-        maxError: 0,
-        totalDelta: 0,
-        solveTime: performance.now() - start,
-      });
+      return this._finish("no-constraints", true, [], 0, 0, 0, 0, start);
     }
 
-    const constraints =
-      this._getOrderedConstraints(constraintSet);
+    const constraints = this._getOrderedConstraints(constraintSet);
 
     if (!constraints.length) {
-      return this._finish({
-        status: "empty",
-        solved: true,
-        constraints: 0,
-        solvedConstraints: 0,
-        unsupportedConstraints: 0,
-        deltaPose: [],
-        maxError: 0,
-        totalDelta: 0,
-        solveTime: performance.now() - start,
-      });
+      return this._finish("empty", true, [], 0, 0, 0, 0, start);
     }
 
     this._updateWorldMatrices(skeleton);
@@ -132,14 +72,12 @@ export class ConstraintSolver {
     let maxError = 0;
     let totalDelta = 0;
     let solvedConstraints = 0;
+    let unresolvedConstraints = 0;
     let unsupportedConstraints = 0;
     let activeConstraints = 0;
-    let unresolvedConstraints = 0;
 
     for (const constraint of constraints) {
-      if (!constraint || constraint.enabled === false) {
-        continue;
-      }
+      if (!constraint || constraint.enabled === false) continue;
 
       if (constraint.type !== "position") {
         unsupportedConstraints++;
@@ -154,11 +92,7 @@ export class ConstraintSolver {
         deltaPose
       );
 
-      maxError = Math.max(
-        maxError,
-        result.error
-      );
-
+      maxError = Math.max(maxError, result.error);
       totalDelta += result.deltaMagnitude;
 
       if (result.solved) {
@@ -168,21 +102,15 @@ export class ConstraintSolver {
       }
     }
 
-    const poseArray =
-      this._mapToPoseArray(deltaPose);
+    const poseArray = this._mapToPoseArray(deltaPose);
 
     let status = "solved";
 
     if (unresolvedConstraints > 0) {
-      status = poseArray.length > 0
-        ? "converging"
-        : "unreachable";
+      status = poseArray.length > 0 ? "converging" : "unreachable";
     }
 
-    if (
-      activeConstraints === 0 &&
-      unsupportedConstraints > 0
-    ) {
+    if (activeConstraints === 0 && unsupportedConstraints > 0) {
       status = "unsupported";
     }
 
@@ -190,24 +118,51 @@ export class ConstraintSolver {
       unresolvedConstraints === 0 &&
       unsupportedConstraints === 0;
 
-    return this._finish({
+    return this._finish(
       status,
       solved,
-      constraints: activeConstraints,
+      poseArray,
+      activeConstraints,
+      solvedConstraints,
+      unsupportedConstraints,
+      maxError,
+      start,
+      totalDelta,
+      unresolvedConstraints
+    );
+  }
+
+  _finish(
+    status,
+    solved,
+    deltaPose,
+    constraints,
+    solvedConstraints,
+    unsupportedConstraints,
+    maxError,
+    start,
+    totalDelta = 0,
+    unresolvedConstraints = 0
+  ) {
+    const result = {
+      status,
+      solved,
+      constraints,
       solvedConstraints,
       unsupportedConstraints,
       unresolvedConstraints,
-      deltaPose: poseArray,
+      deltaPose,
       maxError,
       totalDelta,
       solveTime: performance.now() - start,
-    });
+    };
+
+    this.lastSolveTime = result.solveTime;
+    this.lastResult = result;
+
+    return result;
   }
 
-  /**
-   * HARD first, then SOFT.
-   * Within each group: higher priority first.
-   */
   _getOrderedConstraints(constraintSet) {
     let constraints = [];
 
@@ -219,9 +174,7 @@ export class ConstraintSolver {
         ...constraintSet.getHard(),
         ...constraintSet.getSoft(),
       ];
-    } else if (
-      typeof constraintSet.getEnabled === "function"
-    ) {
+    } else if (typeof constraintSet.getEnabled === "function") {
       constraints = constraintSet.getEnabled();
     }
 
@@ -232,136 +185,76 @@ export class ConstraintSolver {
         const hardA = a.hard ? 1 : 0;
         const hardB = b.hard ? 1 : 0;
 
-        if (hardA !== hardB) {
-          return hardB - hardA;
-        }
+        if (hardA !== hardB) return hardB - hardA;
 
-        const priorityA =
-          Number.isFinite(a.priority) ? a.priority : 0;
+        const priorityA = Number.isFinite(a.priority) ? a.priority : 0;
+        const priorityB = Number.isFinite(b.priority) ? b.priority : 0;
 
-        const priorityB =
-          Number.isFinite(b.priority) ? b.priority : 0;
+        if (priorityA !== priorityB) return priorityB - priorityA;
 
-        if (priorityA !== priorityB) {
-          return priorityB - priorityA;
-        }
-
-        return String(a.id ?? "").localeCompare(
-          String(b.id ?? "")
-        );
+        return String(a.id ?? "").localeCompare(String(b.id ?? ""));
       });
   }
 
-  _solvePositionConstraint(
-    constraint,
-    skeleton,
-    deltaPose
-  ) {
-    const bone =
-      this._resolveBone(constraint, skeleton);
+  _solvePositionConstraint(constraint, skeleton, deltaPose) {
+    const bone = this._resolveBone(constraint, skeleton);
 
     if (!bone) {
-      return {
-        solved: false,
-        error: Infinity,
-        deltaMagnitude: 0,
-      };
+      return { solved: false, error: Infinity, deltaMagnitude: 0 };
     }
 
-    const target =
-      this._getTargetWorldPosition(constraint);
+    const target = this._getTargetWorldPosition(constraint);
 
     if (!target) {
-      return {
-        solved: false,
-        error: Infinity,
-        deltaMagnitude: 0,
-      };
+      return { solved: false, error: Infinity, deltaMagnitude: 0 };
     }
 
-    const current =
-      this._getEffectorWorldPosition(
-        constraint,
-        bone
-      );
-
-    const error = new THREE.Vector3()
-      .subVectors(target, current);
-
+    const current = this._getEffectorWorldPosition(constraint, bone);
+    const error = new THREE.Vector3().subVectors(target, current);
     const errorLength = error.length();
 
     if (!Number.isFinite(errorLength)) {
-      return {
-        solved: false,
-        error: Infinity,
-        deltaMagnitude: 0,
-      };
+      return { solved: false, error: Infinity, deltaMagnitude: 0 };
     }
 
     if (errorLength <= this.positionTolerance) {
-      return {
-        solved: true,
-        error: errorLength,
-        deltaMagnitude: 0,
-      };
+      return { solved: true, error: errorLength, deltaMagnitude: 0 };
     }
 
-    const chain =
-      this._buildRotationChain(bone);
+    const chain = this._buildRotationChain(bone);
 
     if (!chain.length) {
-      return {
-        solved: false,
-        error: errorLength,
-        deltaMagnitude: 0,
-      };
+      return { solved: false, error: errorLength, deltaMagnitude: 0 };
     }
 
     const columns = [];
 
     for (const joint of chain) {
-      const jointPosition =
-        new THREE.Vector3();
-
-      joint.getWorldPosition(jointPosition);
-
-      const offset = new THREE.Vector3()
-        .subVectors(current, jointPosition);
-
-      const axes =
-        this._getWorldRotationAxes(joint);
+      const jointPosition = joint.getWorldPosition(new THREE.Vector3());
+      const offset = new THREE.Vector3().subVectors(current, jointPosition);
+      const axes = this._getWorldRotationAxes(joint);
 
       for (const axis of axes) {
-        const column = new THREE.Vector3()
-          .crossVectors(axis, offset);
-
         columns.push({
           bone: joint,
           axis,
-          value: column,
+          value: new THREE.Vector3().crossVectors(axis, offset),
         });
       }
     }
 
     if (!columns.length) {
-      return {
-        solved: false,
-        error: errorLength,
-        deltaMagnitude: 0,
-      };
+      return { solved: false, error: errorLength, deltaMagnitude: 0 };
     }
 
-    const lambda = this.damping;
-    const lambdaSq = lambda * lambda;
+    const lambdaSq = this.damping * this.damping;
 
     let m00 = lambdaSq;
     let m01 = 0;
     let m02 = 0;
-
     let m10 = 0;
     let m11 = lambdaSq;
     let m12 = 0;
-
     let m20 = 0;
     let m21 = 0;
     let m22 = lambdaSq;
@@ -389,47 +282,25 @@ export class ConstraintSolver {
     );
 
     if (!inverse) {
-      return {
-        solved: false,
-        error: errorLength,
-        deltaMagnitude: 0,
-      };
+      return { solved: false, error: errorLength, deltaMagnitude: 0 };
     }
 
     const y = new THREE.Vector3(
-      inverse.m00 * error.x +
-        inverse.m01 * error.y +
-        inverse.m02 * error.z,
-
-      inverse.m10 * error.x +
-        inverse.m11 * error.y +
-        inverse.m12 * error.z,
-
-      inverse.m20 * error.x +
-        inverse.m21 * error.y +
-        inverse.m22 * error.z
+      inverse.m00 * error.x + inverse.m01 * error.y + inverse.m02 * error.z,
+      inverse.m10 * error.x + inverse.m11 * error.y + inverse.m12 * error.z,
+      inverse.m20 * error.x + inverse.m21 * error.y + inverse.m22 * error.z
     );
 
-    /*
-     * HARD constraints receive full correction.
-     * SOFT constraints are scaled by their weight.
-     */
     const weight = constraint.hard
       ? 1
       : THREE.MathUtils.clamp(
-          Number.isFinite(constraint.weight)
-            ? constraint.weight
-            : 1,
+          Number.isFinite(constraint.weight) ? constraint.weight : 1,
           0,
           1
         );
 
     if (weight <= 0) {
-      return {
-        solved: false,
-        error: errorLength,
-        deltaMagnitude: 0,
-      };
+      return { solved: false, error: errorLength, deltaMagnitude: 0 };
     }
 
     for (const column of columns) {
@@ -440,12 +311,9 @@ export class ConstraintSolver {
         j.y * y.y +
         j.z * y.z;
 
-      if (!Number.isFinite(rawDelta)) {
-        continue;
-      }
+      if (!Number.isFinite(rawDelta)) continue;
 
-      const weightedDelta =
-        rawDelta * weight;
+      const weightedDelta = rawDelta * weight;
 
       const clamped = THREE.MathUtils.clamp(
         weightedDelta,
@@ -453,12 +321,9 @@ export class ConstraintSolver {
         this.maxAngleStep
       );
 
-      if (Math.abs(clamped) < 1e-10) {
-        continue;
-      }
+      if (Math.abs(clamped) < 1e-10) continue;
 
-      let entry =
-        deltaPose.get(column.bone);
+      let entry = deltaPose.get(column.bone);
 
       if (!entry) {
         entry = {
@@ -469,46 +334,25 @@ export class ConstraintSolver {
         deltaPose.set(column.bone, entry);
       }
 
-      entry.rotationWorld.addScaledVector(
-        column.axis,
-        clamped
-      );
+      entry.rotationWorld.addScaledVector(column.axis, clamped);
     }
 
-    const deltaMagnitude =
-      this._calculateDeltaMagnitude(
-        deltaPose,
-        chain
-      );
-
-    /*
-     * A correction has been calculated, but the
-     * constraint is not declared solved yet.
-     * Actual error must be remeasured next frame.
-     */
     return {
       solved: false,
       error: errorLength,
-      deltaMagnitude,
+      deltaMagnitude: this._calculateDeltaMagnitude(deltaPose, chain),
     };
   }
 
   _getEffectorWorldPosition(constraint, bone) {
-    const value =
-      constraint.metadata?.effectorPosition;
+    const value = constraint.metadata?.effectorPosition;
 
     if (
       Array.isArray(value) &&
       value.length >= 3 &&
-      Number.isFinite(value[0]) &&
-      Number.isFinite(value[1]) &&
-      Number.isFinite(value[2])
+      value.slice(0, 3).every(Number.isFinite)
     ) {
-      return new THREE.Vector3(
-        value[0],
-        value[1],
-        value[2]
-      );
+      return new THREE.Vector3(value[0], value[1], value[2]);
     }
 
     if (
@@ -517,47 +361,31 @@ export class ConstraintSolver {
       Number.isFinite(value.y) &&
       Number.isFinite(value.z)
     ) {
-      return new THREE.Vector3(
-        value.x,
-        value.y,
-        value.z
-      );
+      return new THREE.Vector3(value.x, value.y, value.z);
     }
 
-    return bone.getWorldPosition(
-      new THREE.Vector3()
-    );
+    return bone.getWorldPosition(new THREE.Vector3());
   }
 
   _resolveBone(constraint, skeleton) {
-    const metadata =
-      constraint.metadata || {};
-
+    const metadata = constraint.metadata || {};
     const boneName =
       metadata.bone ||
       constraint.boneName ||
       constraint.bone ||
       null;
 
-    if (!boneName) {
-      return null;
-    }
+    if (!boneName) return null;
 
-    if (
-      typeof skeleton.getBoneByName === "function"
-    ) {
-      const bone =
-        skeleton.getBoneByName(boneName);
-
+    if (typeof skeleton.getBoneByName === "function") {
+      const bone = skeleton.getBoneByName(boneName);
       if (bone) return bone;
     }
 
     if (Array.isArray(skeleton.bones)) {
-      for (const bone of skeleton.bones) {
-        if (bone && bone.name === boneName) {
-          return bone;
-        }
-      }
+      return skeleton.bones.find(
+        bone => bone && bone.name === boneName
+      ) || null;
     }
 
     return null;
@@ -565,14 +393,10 @@ export class ConstraintSolver {
 
   _buildRotationChain(effector) {
     const chain = [];
-
     let current = effector;
 
     while (current) {
-      if (
-        current.isBone ||
-        current.type === "Bone"
-      ) {
+      if (current.isBone || current.type === "Bone") {
         chain.push(current);
       }
 
@@ -583,87 +407,57 @@ export class ConstraintSolver {
   }
 
   _getWorldRotationAxes(bone) {
-    const q = new THREE.Quaternion();
+    const q = bone.getWorldQuaternion(new THREE.Quaternion());
 
-    bone.getWorldQuaternion(q);
-
-    const x = new THREE.Vector3(1, 0, 0)
-      .applyQuaternion(q)
-      .normalize();
-
-    const y = new THREE.Vector3(0, 1, 0)
-      .applyQuaternion(q)
-      .normalize();
-
-    const z = new THREE.Vector3(0, 0, 1)
-      .applyQuaternion(q)
-      .normalize();
-
-    return [x, y, z];
+    return [
+      new THREE.Vector3(1, 0, 0).applyQuaternion(q).normalize(),
+      new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize(),
+      new THREE.Vector3(0, 0, 1).applyQuaternion(q).normalize(),
+    ];
   }
 
   _getTargetWorldPosition(constraint) {
     const target = constraint.target;
 
-    if (!target) return null;
+    if (target instanceof THREE.Vector3) return target.clone();
 
-    if (target instanceof THREE.Vector3) {
-      return target.clone();
-    }
-
-    if (
-      Array.isArray(target) &&
-      target.length >= 3
-    ) {
+    if (Array.isArray(target) && target.length >= 3) {
       const values = target.slice(0, 3).map(Number);
 
-      if (!values.every(Number.isFinite)) {
-        return null;
-      }
+      if (!values.every(Number.isFinite)) return null;
 
-      return new THREE.Vector3(
-        values[0],
-        values[1],
-        values[2]
-      );
+      return new THREE.Vector3(values[0], values[1], values[2]);
     }
 
     if (
+      target &&
       Number.isFinite(target.x) &&
       Number.isFinite(target.y) &&
       Number.isFinite(target.z)
     ) {
-      return new THREE.Vector3(
-        target.x,
-        target.y,
-        target.z
-      );
+      return new THREE.Vector3(target.x, target.y, target.z);
     }
 
     return null;
   }
 
   _updateWorldMatrices(skeleton) {
-    if (
-      skeleton.bones &&
-      skeleton.bones.length
-    ) {
-      const root = skeleton.bones[0];
+    if (!skeleton.bones?.length) return;
 
-      if (root?.parent) {
-        root.parent.updateMatrixWorld(true);
-      } else if (root) {
-        root.updateMatrixWorld(true);
-      }
+    let root = skeleton.bones[0];
+
+    while (root.parent?.isObject3D) {
+      root = root.parent;
     }
+
+    root.updateMatrixWorld(true);
   }
 
   _mapToPoseArray(deltaPose) {
     const result = [];
 
     for (const entry of deltaPose.values()) {
-      const rotationWorld =
-        entry.rotationWorld;
+      const rotationWorld = entry.rotationWorld;
 
       if (
         !rotationWorld ||
@@ -674,12 +468,9 @@ export class ConstraintSolver {
         continue;
       }
 
-      const magnitude =
-        rotationWorld.length();
+      const magnitude = rotationWorld.length();
 
-      if (magnitude <= 1e-8) {
-        continue;
-      }
+      if (magnitude <= 1e-8) continue;
 
       result.push({
         bone: entry.bone,
@@ -696,17 +487,17 @@ export class ConstraintSolver {
     let total = 0;
 
     for (const bone of chain) {
-      const entry =
-        deltaPose.get(bone);
-
-      if (!entry) continue;
-
-      total += entry.rotationWorld.length();
+      const entry = deltaPose.get(bone);
+      if (entry) total += entry.rotationWorld.length();
     }
 
     return total;
   }
 
+  /**
+   * Generic 3x3 inverse.
+   * Determinant is expanded along row zero.
+   */
   _invert3x3(
     m00, m01, m02,
     m10, m11, m12,
@@ -726,9 +517,8 @@ export class ConstraintSolver {
 
     const determinant =
       m00 * c00 +
-      m01 * c10 +
-      m02 * c20 +
-      m20 * c02;
+      m01 * c01 +
+      m02 * c02;
 
     if (
       !Number.isFinite(determinant) ||
@@ -739,28 +529,20 @@ export class ConstraintSolver {
 
     const invDet = 1 / determinant;
 
+    // Adjugate = transpose of the cofactor matrix.
     return {
       m00: c00 * invDet,
-      m01: c01 * invDet,
-      m02: c02 * invDet,
+      m01: c10 * invDet,
+      m02: c20 * invDet,
 
-      m10: c10 * invDet,
+      m10: c01 * invDet,
       m11: c11 * invDet,
-      m12: c12 * invDet,
+      m12: c21 * invDet,
 
-      m20: c20 * invDet,
-      m21: c21 * invDet,
+      m20: c02 * invDet,
+      m21: c12 * invDet,
       m22: c22 * invDet,
     };
-  }
-
-  _finish(result) {
-    this.lastSolveTime =
-      result.solveTime;
-
-    this.lastResult = result;
-
-    return result;
   }
 
   getLastResult() {
