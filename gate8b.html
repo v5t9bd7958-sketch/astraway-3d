@@ -1,0 +1,72 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+  />
+  <title>AstraWay — Gate 8B</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #090b10;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    #viewer {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    #status {
+      position: fixed;
+      left: 8px;
+      right: 8px;
+      bottom: 8px;
+      padding: 12px;
+      background: rgba(0, 0, 0, 0.85);
+      border: 1px solid #34465a;
+      border-radius: 8px;
+      color: #d7e1ff;
+      font: 12px/1.5 ui-monospace, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="viewer"></canvas>
+  <div id="status">AstraWay — запуск Gate 8B…</div>
+
+  <script>
+    const params = new URLSearchParams(
+      window.location.search
+    );
+
+    params.set("gate8b", "1");
+
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname +
+        "?" +
+        params.toString() +
+        window.location.hash
+    );
+  </script>
+
+  <script
+    type="module"
+    src="./src/main.js"
+  ></script>
+</body>
+</html>
