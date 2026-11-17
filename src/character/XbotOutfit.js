@@ -1,4 +1,3 @@
-
 import * as THREE from "three";
 
 const PREFIX = "AstraWay_SkinnedOutfit";
@@ -306,9 +305,9 @@ function createOutfitGeometry(source, skeleton) {
     if (!bucket.length) continue;
 
     const start = offsetVertex;
-    const vertexTotal = bucket.length / 13;
+    const vertexTotal = bucket.length / 14;
 
-    for (let i = 0; i < bucket.length; i += 13) {
+    for (let i = 0; i < bucket.length; i += 14) {
       positions.push(
         bucket[i],
         bucket[i + 1],
