@@ -74,6 +74,11 @@ export class AutonomyAgent {
     this.movementGoal = null;
 
     this.goalReachability = "UNKNOWN";
+
+    // Классификация маршрута.
+    this.routeType = "UNKNOWN";
+    this.routePointCount = 0;
+
     this.lastGoalResult = null;
 
     this.sampleElapsed = 0;
@@ -99,6 +104,8 @@ export class AutonomyAgent {
     this.goal = point;
     this.movementGoal = null;
     this.goalReachability = "UNKNOWN";
+    this.routeType = "UNKNOWN";
+    this.routePointCount = 0;
     this.lastGoalResult = null;
 
     this.recoveryAttempts = 0;
@@ -114,6 +121,9 @@ export class AutonomyAgent {
     } catch (error) {
       this.goal = null;
       this.movementGoal = null;
+      this.goalReachability = "UNKNOWN";
+      this.routeType = "UNKNOWN";
+      this.routePointCount = 0;
       this.state = STATE.IDLE;
       throw error;
     }
@@ -154,6 +164,8 @@ export class AutonomyAgent {
     this.goal = null;
     this.movementGoal = null;
     this.goalReachability = "UNKNOWN";
+    this.routeType = "UNKNOWN";
+    this.routePointCount = 0;
     this.lastGoalResult = null;
 
     this.state = STATE.IDLE;
@@ -225,12 +237,19 @@ export class AutonomyAgent {
       // REACHABLE / PARTIAL / UNKNOWN.
       goalReachability: this.goalReachability,
 
+      // Классификация маршрута:
+      // DIRECT / DETOUR / PARTIAL / UNKNOWN.
+      routeType: this.routeType,
+      routePointCount: this.routePointCount,
+
       // Последний завершённый результат.
       lastGoalResult: this.lastGoalResult
         ? {
             requested: this.lastGoalResult.requested.clone(),
             destination: this.lastGoalResult.destination.clone(),
             reachability: this.lastGoalResult.reachability,
+            routeType: this.lastGoalResult.routeType,
+            routePointCount: this.lastGoalResult.routePointCount,
             offset: this.lastGoalResult.offset,
           }
         : null,
@@ -262,6 +281,8 @@ export class AutonomyAgent {
     this.goal = null;
     this.movementGoal = null;
     this.lastGoalResult = null;
+    this.routeType = "UNKNOWN";
+    this.routePointCount = 0;
 
     this.state = STATE.DISPOSED;
     this.disposed = true;
@@ -299,6 +320,35 @@ export class AutonomyAgent {
       offset > this.config.goalProjectionTolerance
         ? "PARTIAL"
         : "REACHABLE";
+
+    this._captureRoutePlan();
+  }
+
+  _captureRoutePlan() {
+    const path = this.human.movePath;
+
+    if (this.goalReachability === "PARTIAL") {
+      this.routeType = "PARTIAL";
+      this.routePointCount =
+        Array.isArray(path) ? path.length : 0;
+      return;
+    }
+
+    if (path === null) {
+      this.routeType = "DIRECT";
+      this.routePointCount = 0;
+      return;
+    }
+
+    if (Array.isArray(path)) {
+      this.routePointCount = path.length;
+      this.routeType =
+        path.length > 0 ? "DETOUR" : "DIRECT";
+      return;
+    }
+
+    this.routeType = "UNKNOWN";
+    this.routePointCount = 0;
   }
 
   _evaluateProgress() {
@@ -390,6 +440,8 @@ export class AutonomyAgent {
       requested,
       destination,
       reachability,
+      routeType: this.routeType,
+      routePointCount: this.routePointCount,
       offset: requested.distanceTo(destination),
     };
 
