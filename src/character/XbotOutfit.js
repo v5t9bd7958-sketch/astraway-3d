@@ -1,22 +1,23 @@
+
 import * as THREE from "three";
+
+const PREFIX = "AstraWay_TestOutfit";
 
 const MATERIALS = {
   jacket: new THREE.MeshStandardMaterial({
-    color: 0x34483f,
-    roughness: 0.92,
+    color: 0x245d91,
+    roughness: 0.82,
+    side: THREE.DoubleSide,
   }),
   pants: new THREE.MeshStandardMaterial({
-    color: 0x9a8060,
-    roughness: 0.96,
+    color: 0x9a7545,
+    roughness: 0.9,
+    side: THREE.DoubleSide,
   }),
   leather: new THREE.MeshStandardMaterial({
-    color: 0x493326,
-    roughness: 0.85,
-  }),
-  metal: new THREE.MeshStandardMaterial({
-    color: 0x9b8150,
-    metalness: 0.55,
-    roughness: 0.5,
+    color: 0x38271f,
+    roughness: 0.86,
+    side: THREE.DoubleSide,
   }),
 };
 
@@ -32,93 +33,126 @@ function findBone(root, name) {
   return result;
 }
 
-function addFittedPart(
-  root,
-  boneName,
-  geometry,
-  material,
-  position,
-  scale
-) {
-  const parent = findBone(root, boneName);
+function boneDistance(a, b) {
+  if (!a || !b) return 0;
 
-  if (!parent) {
-    console.warn(`[AstraWay Outfit] Bone missing: ${boneName}`);
-    return false;
-  }
+  const pa = a.getWorldPosition(new THREE.Vector3());
+  const pb = b.getWorldPosition(new THREE.Vector3());
 
-  const mesh = new THREE.Mesh(geometry, material);
-
-  mesh.position.copy(position);
-  mesh.scale.copy(scale);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  mesh.name = "AstraWay_TestOutfit";
-
-  parent.add(mesh);
-
-  return true;
+  return pa.distanceTo(pb);
 }
 
-function addBoneSegment(
-  root,
-  startName,
-  endName,
-  radius,
-  material
-) {
-  const startBone = findBone(root, startName);
-  const endBone = findBone(root, endName);
+function removePreviousOutfit(root) {
+  const removals = [];
 
-  if (!startBone || !endBone) {
-    console.warn(
-      `[AstraWay Outfit] Segment missing: ${startName} → ${endName}`
-    );
-    return false;
+  root.traverse((object) => {
+    if (object.isMesh && object.name.startsWith(PREFIX)) {
+      removals.push(object);
+    }
+  });
+
+  for (const mesh of removals) {
+    mesh.parent?.remove(mesh);
+    mesh.geometry.dispose();
   }
+}
+
+function addSegment(root, startName, endName, ratio, material) {
+  const start = findBone(root, startName);
+  const end = findBone(root, endName);
+
+  if (!start || !end) return false;
 
   root.updateMatrixWorld(true);
 
-  const endWorld = endBone.getWorldPosition(
-    new THREE.Vector3()
-  );
+  const endWorld = end.getWorldPosition(new THREE.Vector3());
+  const endLocal = start.worldToLocal(endWorld.clone());
 
-  const endLocal = startBone.worldToLocal(endWorld.clone());
   const length = endLocal.length();
 
-  if (length < 0.001) return false;
+  if (!Number.isFinite(length) || length < 0.005) {
+    return false;
+  }
 
-  const direction = endLocal.clone().normalize();
+  const radius = Math.min(length * ratio, length * 0.42);
+  const cylinderLength = Math.max(length - radius * 2, 0.001);
 
-  const mesh = new THREE.Mesh(
-    new THREE.CylinderGeometry(
-      radius * 0.88,
-      radius,
-      length,
-      12
-    ),
-    material
+  const geometry = new THREE.CapsuleGeometry(
+    radius,
+    cylinderLength,
+    5,
+    12
   );
 
+  const mesh = new THREE.Mesh(geometry, material);
+
+  mesh.name = `${PREFIX}_${startName}_${endName}`;
   mesh.position.copy(endLocal).multiplyScalar(0.5);
 
   mesh.quaternion.setFromUnitVectors(
     new THREE.Vector3(0, 1, 0),
-    direction
+    endLocal.clone().normalize()
+  );
+
+  mesh.scale.z = 0.82;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.frustumCulled = false;
+
+  start.add(mesh);
+
+  return true;
+}
+
+function addTorsoSection(root, startName, endName, width, material) {
+  const start = findBone(root, startName);
+  const end = findBone(root, endName);
+
+  if (!start || !end || width <= 0) return false;
+
+  root.updateMatrixWorld(true);
+
+  const endWorld = end.getWorldPosition(new THREE.Vector3());
+  const endLocal = start.worldToLocal(endWorld.clone());
+  const length = endLocal.length();
+
+  if (length < 0.005) return false;
+
+  const geometry = new THREE.SphereGeometry(1, 16, 12);
+  const mesh = new THREE.Mesh(geometry, material);
+
+  mesh.name = `${PREFIX}_Torso_${startName}`;
+  mesh.position.copy(endLocal).multiplyScalar(0.5);
+
+  mesh.quaternion.setFromUnitVectors(
+    new THREE.Vector3(0, 1, 0),
+    endLocal.clone().normalize()
+  );
+
+  mesh.scale.set(
+    width * 0.46,
+    length * 0.72,
+    width * 0.34
   );
 
   mesh.castShadow = true;
   mesh.receiveShadow = true;
-  mesh.name = "AstraWay_TestOutfit";
+  mesh.frustumCulled = false;
 
-  // Деталь следует за родительской костью.
-  startBone.add(mesh);
+  start.add(mesh);
 
   return true;
 }
 
 export function attachXbotOutfit(root) {
-  const requiredBones = [
+  if (!root) {
+    throw new Error("XBot outfit: model root is missing");
+  }
+
+  root.updateMatrixWorld(true);
+  removePreviousOutfit(root);
+
+  const required = [
     "Hips",
     "Spine",
     "Spine2",
@@ -130,88 +164,81 @@ export function attachXbotOutfit(root) {
     "RightFoot",
   ];
 
-  for (const name of requiredBones) {
-    if (!findBone(root, name)) {
-      throw new Error(`XBot outfit: required bone missing: ${name}`);
-    }
+  const missing = required.filter((name) => !findBone(root, name));
+
+  if (missing.length) {
+    throw new Error(
+      `XBot outfit: missing bones: ${missing.join(", ")}`
+    );
   }
 
-  root.updateMatrixWorld(true);
+  const leftShoulder = findBone(root, "LeftShoulder");
+  const rightShoulder = findBone(root, "RightShoulder");
 
-  // Куртка.
-  addFittedPart(
-    root,
-    "Spine",
-    new THREE.CapsuleGeometry(0.205, 0.30, 5, 12),
-    MATERIALS.jacket,
-    new THREE.Vector3(0, 0.13, 0),
-    new THREE.Vector3(1, 1, 0.78)
+  const shoulderWidth = boneDistance(
+    leftShoulder,
+    rightShoulder
   );
 
-  addFittedPart(
-    root,
-    "Spine2",
-    new THREE.CapsuleGeometry(0.205, 0.12, 4, 12),
-    MATERIALS.jacket,
-    new THREE.Vector3(0, 0.02, 0),
-    new THREE.Vector3(1.08, 0.85, 0.82)
+  const leftUpperLegLength = boneDistance(
+    findBone(root, "LeftUpLeg"),
+    findBone(root, "LeftLeg")
   );
 
-  // Пояс и пряжка.
-  addFittedPart(
-    root,
-    "Hips",
-    new THREE.TorusGeometry(0.19, 0.025, 8, 24),
-    MATERIALS.leather,
-    new THREE.Vector3(0, 0.035, 0),
-    new THREE.Vector3(1.15, 1, 0.82)
+  const rightUpperLegLength = boneDistance(
+    findBone(root, "RightUpLeg"),
+    findBone(root, "RightLeg")
   );
 
-  addFittedPart(
-    root,
-    "Hips",
-    new THREE.BoxGeometry(0.075, 0.065, 0.035),
-    MATERIALS.metal,
-    new THREE.Vector3(0, 0.035, 0.19),
-    new THREE.Vector3(1, 1, 1)
-  );
+  const referenceWidth = shoulderWidth > 0.01
+    ? shoulderWidth
+    : Math.max(leftUpperLegLength, rightUpperLegLength) * 0.85;
 
-  // Рукава и предплечья.
-  addBoneSegment(root, "LeftArm", "LeftForeArm", 0.075, MATERIALS.jacket);
-  addBoneSegment(root, "RightArm", "RightForeArm", 0.075, MATERIALS.jacket);
+  let created = 0;
 
-  addBoneSegment(root, "LeftForeArm", "LeftHand", 0.065, MATERIALS.leather);
-  addBoneSegment(root, "RightForeArm", "RightHand", 0.065, MATERIALS.leather);
+  const add = (...args) => {
+    if (addSegment(root, ...args)) created++;
+  };
+
+  // Куртка: ширина рассчитывается по плечевому поясу.
+  if (addTorsoSection(
+    root, "Hips", "Spine", referenceWidth, MATERIALS.jacket
+  )) created++;
+
+  if (addTorsoSection(
+    root, "Spine", "Spine2", referenceWidth, MATERIALS.jacket
+  )) created++;
+
+  // Рукава.
+  add("LeftShoulder", "LeftArm", 0.19, MATERIALS.jacket);
+  add("RightShoulder", "RightArm", 0.19, MATERIALS.jacket);
+
+  add("LeftArm", "LeftForeArm", 0.17, MATERIALS.jacket);
+  add("RightArm", "RightForeArm", 0.17, MATERIALS.jacket);
+
+  // Кожаные манжеты и перчатки.
+  add("LeftForeArm", "LeftHand", 0.15, MATERIALS.leather);
+  add("RightForeArm", "RightHand", 0.15, MATERIALS.leather);
 
   // Брюки.
-  addBoneSegment(root, "LeftUpLeg", "LeftLeg", 0.105, MATERIALS.pants);
-  addBoneSegment(root, "RightUpLeg", "RightLeg", 0.105, MATERIALS.pants);
+  add("LeftUpLeg", "LeftLeg", 0.19, MATERIALS.pants);
+  add("RightUpLeg", "RightLeg", 0.19, MATERIALS.pants);
 
-  addBoneSegment(root, "LeftLeg", "LeftFoot", 0.075, MATERIALS.pants);
-  addBoneSegment(root, "RightLeg", "RightFoot", 0.075, MATERIALS.pants);
+  add("LeftLeg", "LeftFoot", 0.16, MATERIALS.pants);
+  add("RightLeg", "RightFoot", 0.16, MATERIALS.pants);
 
-  // Ботинки.
-  addFittedPart(
-    root,
-    "LeftFoot",
-    new THREE.BoxGeometry(0.14, 0.12, 0.25),
-    MATERIALS.leather,
-    new THREE.Vector3(0, -0.015, 0.07),
-    new THREE.Vector3(1, 1, 1)
-  );
-
-  addFittedPart(
-    root,
-    "RightFoot",
-    new THREE.BoxGeometry(0.14, 0.12, 0.25),
-    MATERIALS.leather,
-    new THREE.Vector3(0, -0.015, 0.07),
-    new THREE.Vector3(1, 1, 1)
-  );
+  // Обувь — по реальной длине стопы.
+  add("LeftFoot", "LeftToeBase", 0.25, MATERIALS.leather);
+  add("RightFoot", "RightToeBase", 0.25, MATERIALS.leather);
 
   root.updateMatrixWorld(true);
 
-  console.log("[AstraWay Outfit] TEST OUTFIT ATTACHED");
+  console.log("[AstraWay Outfit] ATTACHED", {
+    createdParts: created,
+    shoulderWidth: Number(shoulderWidth.toFixed(4)),
+    leftUpperLegLength: Number(leftUpperLegLength.toFixed(4)),
+    rightUpperLegLength: Number(rightUpperLegLength.toFixed(4)),
+  });
 
-  return true;
+  return created > 0;
 }
