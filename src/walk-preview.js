@@ -1,4 +1,3 @@
-
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
@@ -908,11 +907,10 @@ function animate(now) {
     dt = 0;
   }
 
-  dt = Math.min(dt, 0.05);
-
   if (human && autonomyAgent) {
     try {
       // AutonomyAgent — единственный владелец human.update(dt).
+      // Реальный dt передаётся locomotion backend без внешнего clamp.
       autonomyAgent.update(dt);
 
       updateCamera();
