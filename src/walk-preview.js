@@ -5,6 +5,7 @@ import { canonicalizeGLBBones } from "@three-ws/retarget";
 import { createProceduralHuman } from "three-procedural-locomotion";
 import { WorldAdapter } from "./world/WorldAdapter.js";
 import { AutonomyAgent } from "./character/AutonomyAgent.js";
+import { attachXbotOutfit } from "./character/XbotOutfit.js";
 
 const canvas = document.querySelector("#viewer");
 const status = document.querySelector("#status");
@@ -608,6 +609,9 @@ async function loadCharacter() {
     scene.add(characterRoot);
 
     scene.updateMatrixWorld(true);
+
+    // Одежда крепится к костям XBot до запуска locomotion.
+    attachXbotOutfit(model);
 
     const leftFoot = findBone(model, "LeftFoot");
     const rightFoot = findBone(model, "RightFoot");
