@@ -1,27 +1,6 @@
 
 import * as THREE from "three";
 
-/**
- * AstraWay — Universal Autonomy Agent V1
- *
- * Owns high-level character movement:
- * - accepts world-space goals;
- * - selects walk/run mode;
- * - delegates pathfinding and procedural movement
- *   to the existing ProceduralHuman backend;
- * - monitors progress and arrival;
- * - performs one conservative recovery attempt
- *   when movement appears blocked.
- *
- * IMPORTANT:
- * - The agent is the ONLY caller of human.update(dt)
- *   while it controls this character.
- * - The agent does not write bones or skeleton transforms.
- * - The agent does not replace WorldAdapter or locomotion.
- * - World geometry must be registered before the human
- *   backend is created.
- */
-
 const STATE = Object.freeze({
   IDLE: "IDLE",
   MOVING: "MOVING",
@@ -40,10 +19,8 @@ export class AutonomyAgent {
   constructor({
     human,
     worldAdapter = null,
-
     arrivalRadius = 0.16,
     arrivalSpeed = 0.2,
-
     progressSampleInterval = 0.6,
     progressEpsilon = 0.025,
     blockedSpeed = 0.05,
@@ -86,72 +63,52 @@ export class AutonomyAgent {
 
     this.state = STATE.IDLE;
     this.mode = MODE.WALK;
-
     this.goal = null;
 
-    this.elapsed = 0;
     this.sampleElapsed = 0;
     this.stagnantElapsed = 0;
-
     this.recoveryAttempts = 0;
 
     this.lastPosition = new THREE.Vector3();
     this.hasLastPosition = false;
-
     this.disposed = false;
   }
 
-  /**
-   * Set a world-space destination.
-   *
-   * Accepts:
-   * - THREE.Vector3
-   * - { x, y, z }
-   * - [x, y, z]
-   */
   setGoal(target, options = {}) {
     this._assertActive();
 
     const point = this._toVector3(target);
 
     if (options.run !== undefined) {
-      this.mode = options.run
-        ? MODE.RUN
-        : MODE.WALK;
+      this.mode = options.run ? MODE.RUN : MODE.WALK;
     }
 
     this._assertWorldReady();
 
     this.goal = point;
     this.recoveryAttempts = 0;
-
-    this.elapsed = 0;
     this.sampleElapsed = 0;
     this.stagnantElapsed = 0;
 
     this.lastPosition.copy(this.human.position);
     this.hasLastPosition = true;
 
-    this._issueMovement();
-
-    this.state = STATE.MOVING;
+    try {
+      this._issueMovement();
+      this.state = STATE.MOVING;
+    } catch (error) {
+      this.goal = null;
+      this.state = STATE.IDLE;
+      throw error;
+    }
 
     return this.getState();
   }
 
-  /**
-   * Change movement mode.
-   *
-   * If a goal is active, movement is reissued
-   * using the new mode.
-   */
   setMode(mode) {
     this._assertActive();
 
-    if (
-      mode !== MODE.WALK &&
-      mode !== MODE.RUN
-    ) {
+    if (mode !== MODE.WALK && mode !== MODE.RUN) {
       throw new RangeError(
         `AutonomyAgent: unsupported mode "${mode}"`
       );
@@ -173,34 +130,21 @@ export class AutonomyAgent {
     return this.mode;
   }
 
-  /**
-   * Stop movement and clear the active goal.
-   */
   stop() {
     this._assertActive();
 
     this.human.stop();
-
     this.goal = null;
-
     this.state = STATE.IDLE;
 
-    this.elapsed = 0;
     this.sampleElapsed = 0;
     this.stagnantElapsed = 0;
-
     this.recoveryAttempts = 0;
     this.hasLastPosition = false;
 
     return this.getState();
   }
 
-  /**
-   * Main update.
-   *
-   * Call once per frame instead of calling human.update()
-   * directly while this agent owns the character.
-   */
   update(dt) {
     this._assertActive();
 
@@ -210,7 +154,7 @@ export class AutonomyAgent {
 
     const delta = Math.min(dt, 0.1);
 
-    // The agent owns the backend update.
+    // Единственное место обновления locomotion backend.
     this.human.update(delta);
 
     if (
@@ -223,15 +167,12 @@ export class AutonomyAgent {
       return this.getState();
     }
 
-    this.elapsed += delta;
     this.sampleElapsed += delta;
 
     if (this._hasArrived()) {
       this.state = STATE.ARRIVED;
       this.goal = null;
-
       this.stagnantElapsed = 0;
-
       return this.getState();
     }
 
@@ -246,53 +187,35 @@ export class AutonomyAgent {
     return this.getState();
   }
 
-  /**
-   * Read-only runtime state.
-   */
   getState() {
     const position = this.human.position;
 
     return {
       state: this.state,
       mode: this.mode,
-
-      goal: this.goal
-        ? this.goal.clone()
-        : null,
-
+      goal: this.goal ? this.goal.clone() : null,
       position: position.clone(),
-
       speed: Number.isFinite(this.human.speed)
         ? this.human.speed
         : 0,
-
       heading: Number.isFinite(this.human.heading)
         ? this.human.heading
         : 0,
-
       airborne: !!this.human.airborne,
-
       recoveryAttempts: this.recoveryAttempts,
-
       world: this.worldAdapter
         ? this.worldAdapter.getDiagnostics()
         : null,
     };
   }
 
-  /**
-   * Release agent ownership.
-   * Does not dispose the model or WorldAdapter.
-   */
   dispose() {
     if (this.disposed) return;
 
     this.human.stop();
-
     this.goal = null;
     this.state = STATE.DISPOSED;
     this.disposed = true;
-
     this.hasLastPosition = false;
   }
 
@@ -303,8 +226,6 @@ export class AutonomyAgent {
       );
     }
 
-    // Supported backend API.
-    // Do not add undocumented movement options here.
     this.human.moveTo(
       this.goal.clone(),
       {
@@ -322,9 +243,10 @@ export class AutonomyAgent {
       return;
     }
 
-    const progress = current.distanceTo(
-      this.lastPosition
-    );
+    // Продвижение оценивается только в плоскости XZ.
+    const dx = current.x - this.lastPosition.x;
+    const dz = current.z - this.lastPosition.z;
+    const progress = Math.sqrt(dx * dx + dz * dz);
 
     this.lastPosition.copy(current);
 
@@ -332,7 +254,8 @@ export class AutonomyAgent {
       ? this.human.speed
       : 0;
 
-    const nearGoal = this._distanceToGoal() <=
+    const nearGoal =
+      this._distanceToGoal() <=
       this.config.arrivalRadius * 2;
 
     if (
@@ -368,7 +291,6 @@ export class AutonomyAgent {
       ) {
         this.state = STATE.BLOCKED;
       }
-
       return;
     }
 
@@ -376,17 +298,12 @@ export class AutonomyAgent {
     this.state = STATE.RECOVERING;
 
     try {
-      // Reissue the same goal.
-      // The locomotion backend recalculates its route.
+      // Повторная передача цели backend для пересчёта маршрута.
       this._issueMovement();
 
       this.stagnantElapsed = 0;
       this.sampleElapsed = 0;
-
-      this.lastPosition.copy(
-        this.human.position
-      );
-
+      this.lastPosition.copy(this.human.position);
       this.state = STATE.MOVING;
     } catch (error) {
       this.state = STATE.BLOCKED;
@@ -397,15 +314,11 @@ export class AutonomyAgent {
   _hasArrived() {
     if (!this.goal) return false;
 
-    const distance = this._distanceToGoal();
-
-    const speed = Number.isFinite(this.human.speed)
-      ? this.human.speed
-      : 0;
-
     return (
-      distance <= this.config.arrivalRadius &&
-      speed <= this.config.arrivalSpeed &&
+      this._distanceToGoal() <= this.config.arrivalRadius &&
+      (Number.isFinite(this.human.speed)
+        ? this.human.speed
+        : 0) <= this.config.arrivalSpeed &&
       !this.human.airborne
     );
   }
@@ -413,7 +326,6 @@ export class AutonomyAgent {
   _distanceToGoal() {
     if (!this.goal) return Infinity;
 
-    // Ground navigation uses horizontal distance.
     const dx = this.goal.x - this.human.position.x;
     const dz = this.goal.z - this.human.position.z;
 
@@ -423,8 +335,7 @@ export class AutonomyAgent {
   _assertWorldReady() {
     if (!this.worldAdapter) return;
 
-    const diagnostics =
-      this.worldAdapter.getDiagnostics();
+    const diagnostics = this.worldAdapter.getDiagnostics();
 
     if (!diagnostics?.ready) {
       throw new Error(
