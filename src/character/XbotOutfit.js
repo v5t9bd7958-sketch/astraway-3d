@@ -1,71 +1,89 @@
 // src/character/XbotOutfit.js
-// AstraWay — soft pajama outfit (dusty mauve, loose fit, silhouette slippers)
+// AstraWay — feminine black latex catsuit + hair / face
 import * as THREE from "three";
 
-const TAG = "AstraWay_Pajama_";
+const TAG = "AstraWay_Latex_";
 
-// Палитра с фото: пыльно-лиловая / mauve fluffy
 const MAT = {
-  pj: new THREE.MeshStandardMaterial({
-    color: 0xb08a96,
-    roughness: 0.92,
-    metalness: 0.0,
+  latex: new THREE.MeshStandardMaterial({
+    color: 0x0a0a0c,
+    roughness: 0.18,
+    metalness: 0.55,
     side: THREE.DoubleSide,
   }),
-  pjLight: new THREE.MeshStandardMaterial({
-    color: 0xc4a0ab,
-    roughness: 0.9,
-    metalness: 0.0,
+  latexSoft: new THREE.MeshStandardMaterial({
+    color: 0x121216,
+    roughness: 0.22,
+    metalness: 0.45,
     side: THREE.DoubleSide,
   }),
-  pjDark: new THREE.MeshStandardMaterial({
-    color: 0x8f6e79,
-    roughness: 0.94,
-    metalness: 0.0,
+  latexDeep: new THREE.MeshStandardMaterial({
+    color: 0x050507,
+    roughness: 0.15,
+    metalness: 0.6,
     side: THREE.DoubleSide,
   }),
-  cuff: new THREE.MeshStandardMaterial({
-    color: 0x9a7883,
-    roughness: 0.88,
-    metalness: 0.0,
+  gloss: new THREE.MeshStandardMaterial({
+    color: 0x1a1a22,
+    roughness: 0.1,
+    metalness: 0.7,
     side: THREE.DoubleSide,
   }),
-  embroidery: new THREE.MeshStandardMaterial({
-    color: 0xf2e6ea,
-    roughness: 0.75,
+  hair: new THREE.MeshStandardMaterial({
+    color: 0x1c1210,
+    roughness: 0.72,
     metalness: 0.05,
     side: THREE.DoubleSide,
   }),
-  slipper: new THREE.MeshStandardMaterial({
-    color: 0xc9b4bc,
-    roughness: 0.85,
-    metalness: 0.0,
+  hairShine: new THREE.MeshStandardMaterial({
+    color: 0x2a1c18,
+    roughness: 0.45,
+    metalness: 0.12,
     side: THREE.DoubleSide,
   }),
-  sole: new THREE.MeshStandardMaterial({
-    color: 0x6e5a62,
-    roughness: 0.95,
+  skin: new THREE.MeshStandardMaterial({
+    color: 0xd4a88c,
+    roughness: 0.78,
     metalness: 0.0,
   }),
-  hair: new THREE.MeshStandardMaterial({
-    color: 0x3a2a24,
-    roughness: 0.95,
+  skinSoft: new THREE.MeshStandardMaterial({
+    color: 0xe0b59a,
+    roughness: 0.82,
+    metalness: 0.0,
   }),
-  skin: new THREE.MeshStandardMaterial({
-    color: 0xc49a7a,
-    roughness: 0.88,
+  lip: new THREE.MeshStandardMaterial({
+    color: 0xb85a6a,
+    roughness: 0.4,
+    metalness: 0.08,
   }),
-  eyes: new THREE.MeshStandardMaterial({
-    color: 0x1a1412,
-    roughness: 0.45,
+  eyeWhite: new THREE.MeshStandardMaterial({
+    color: 0xf2ebe6,
+    roughness: 0.55,
+  }),
+  iris: new THREE.MeshStandardMaterial({
+    color: 0x3a4a5c,
+    roughness: 0.35,
+    metalness: 0.1,
+  }),
+  pupil: new THREE.MeshStandardMaterial({
+    color: 0x0c0a0a,
+    roughness: 0.3,
+  }),
+  brow: new THREE.MeshStandardMaterial({
+    color: 0x2a1e1a,
+    roughness: 0.85,
   }),
 };
 
 const UP = new THREE.Vector3(0, 1, 0);
 const DEFAULT_FORWARD = new THREE.Vector3(0, 0, -1);
 
-// Свободная пижама: заметно снаружи скина, без «перекраски торса».
-const LOOSE = 1.32;
+// Обтяжка: чуть снаружи скина, без «мешка».
+const FIT = 1.12;
+// Женственный акцент бёдер / груди.
+const FEM_BUST = 1.18;
+const FEM_HIP = 1.22;
+const FEM_WAIST = 0.92;
 
 function findBone(root, name) {
   let result = null;
@@ -88,7 +106,12 @@ function boneLen(a, b) {
 function removeOldOutfit(root) {
   const old = [];
   root.traverse((o) => {
-    if (o.name && (o.name.startsWith(TAG) || o.name.startsWith("AstraWay_Ranger_"))) {
+    if (
+      o.name &&
+      (o.name.startsWith(TAG) ||
+        o.name.startsWith("AstraWay_Ranger_") ||
+        o.name.startsWith("AstraWay_Pajama_"))
+    ) {
       old.push(o);
     }
   });
@@ -99,7 +122,7 @@ function removeOldOutfit(root) {
 }
 
 function addEllipsoid(root, parentBone, worldCenter, scale, material, name) {
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 28, 20), material);
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), material);
   mesh.name = TAG + name;
   mesh.position.copy(root.worldToLocal(worldCenter.clone()));
   mesh.scale.copy(scale);
@@ -114,18 +137,15 @@ function addEllipsoid(root, parentBone, worldCenter, scale, material, name) {
   return mesh;
 }
 
-/**
- * Объём одежды вдоль сегмента кости.
- * radiusFrac — доля длины сегмента; LOOSE выводит силуэт наружу.
- */
-function addSleeve(
+function addSegment(
   root,
   boneA,
   boneB,
   radiusFracX,
   radiusFracZ,
   material,
-  name
+  name,
+  scaleMul = 1
 ) {
   if (!boneA || !boneB) return false;
 
@@ -142,15 +162,14 @@ function addSleeve(
   const rq = root.getWorldQuaternion(new THREE.Quaternion());
   const lq = rq.clone().invert().multiply(wq);
 
-  const rx = Math.max(length * radiusFracX, 0.018) * LOOSE;
-  const rz = Math.max(length * radiusFracZ, 0.018) * LOOSE;
+  const rx = Math.max(length * radiusFracX, 0.016) * FIT * scaleMul;
+  const rz = Math.max(length * radiusFracZ, 0.016) * FIT * scaleMul;
 
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 28, 20), material);
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), material);
   mesh.name = TAG + name;
   mesh.position.copy(root.worldToLocal(mid));
   mesh.quaternion.copy(lq);
-  // Чуть короче сегмента по оси, чтобы не «лезло» в суставы артефактами.
-  mesh.scale.set(rx, length * 0.48 + rx * 0.2, rz);
+  mesh.scale.set(rx, length * 0.48 + rx * 0.18, rz);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   mesh.renderOrder = 3;
@@ -164,19 +183,19 @@ function addSleeve(
 
 export function attachXbotOutfit(root) {
   if (!root?.isObject3D) {
-    throw new Error("Pajama: invalid model root");
+    throw new Error("Latex: invalid model root");
   }
 
   root.updateMatrixWorld(true);
   removeOldOutfit(root);
 
   const bounds = new THREE.Box3().setFromObject(root);
-  if (bounds.isEmpty()) throw new Error("Pajama: empty bounds");
+  if (bounds.isEmpty()) throw new Error("Latex: empty bounds");
 
   const size = bounds.getSize(new THREE.Vector3());
   const height = size.y;
   if (!Number.isFinite(height) || height < 0.1) {
-    throw new Error("Pajama: invalid height");
+    throw new Error("Latex: invalid height");
   }
 
   const B = {
@@ -225,67 +244,85 @@ export function attachXbotOutfit(root) {
     boneLen(B.leftShoulder, B.rightShoulder) || height * 0.22;
 
   // =========================================================
-  // ВЕРХ ПИЖАМЫ — свободный свитшот (несколько слоёв = объём, не «краска»)
+  // BODYSUIT TORSO — обтяжка + женственный объём
   // =========================================================
 
-  // Основной торс: Hips → Spine2, широкий
-  if (B.hips && B.spine2) {
-    addSleeve(root, B.hips, B.spine2, 0.5, 0.4, MAT.pj, "TopCore");
-  } else if (B.hips && B.spine) {
-    addSleeve(root, B.hips, B.spine, 0.52, 0.42, MAT.pj, "TopCore");
-  }
-
-  // Грудь / верх свитшота чуть объёмнее
-  if (B.spine1 && B.spine2) {
-    addSleeve(root, B.spine1, B.spine2, 0.48, 0.4, MAT.pjLight, "TopChest");
-  }
-
-  // Низ свитшота (лёгкий напуск над бёдрами)
+  // Талия (уже)
   if (B.hips && B.spine) {
-    const hipsP = worldPos(B.hips);
-    const hemR = Math.max(torsoLen * 0.38, shoulderSpan * 0.32) * LOOSE;
-    addEllipsoid(
+    addSegment(
       root,
       B.hips,
-      hipsP.clone().add(new THREE.Vector3(0, torsoLen * 0.08, 0)),
-      new THREE.Vector3(hemR * 1.05, torsoLen * 0.12 * LOOSE, hemR * 0.85),
-      MAT.pjDark,
-      "TopHem"
+      B.spine,
+      0.36 * FEM_WAIST,
+      0.3 * FEM_WAIST,
+      MAT.latexDeep,
+      "Waist",
+      1
     );
   }
 
-  // Горловина
-  if (B.neck) {
-    const np = worldPos(B.neck);
-    const nr = Math.max(shoulderSpan * 0.18, height * 0.035) * LOOSE;
-    addEllipsoid(
+  // Торс
+  if (B.spine && B.spine2) {
+    addSegment(
       root,
-      B.neck,
-      np,
-      new THREE.Vector3(nr * 1.05, height * 0.028 * LOOSE, nr * 0.95),
-      MAT.cuff,
-      "Neckline"
+      B.spine,
+      B.spine2,
+      0.4,
+      0.34,
+      MAT.latex,
+      "Torso",
+      1
     );
+  } else if (B.hips && B.spine2) {
+    addSegment(root, B.hips, B.spine2, 0.4, 0.34, MAT.latex, "Torso", 1);
   }
 
-  // Намёк на вышивку на груди (светлое пятно)
+  // Бюст (лёгкий объём вперёд)
   if (B.spine2) {
     const chest = worldPos(B.spine2).add(
-      forward.clone().multiplyScalar(Math.max(torsoLen * 0.22, 0.04) * LOOSE)
+      forward.clone().multiplyScalar(torsoLen * 0.12 * FEM_BUST)
     );
-    const e = Math.max(torsoLen * 0.1, height * 0.025) * LOOSE;
+    const br = Math.max(torsoLen * 0.16, height * 0.04) * FIT * FEM_BUST;
     addEllipsoid(
       root,
       B.spine2,
       chest,
-      new THREE.Vector3(e * 1.4, e * 0.55, e * 0.35),
-      MAT.embroidery,
-      "Embroidery"
+      new THREE.Vector3(br * 1.35, br * 0.85, br * 0.7),
+      MAT.latexSoft,
+      "Bust"
+    );
+  }
+
+  // Бёдра
+  if (B.hips) {
+    const hp = worldPos(B.hips);
+    const hr = Math.max(torsoLen * 0.34, shoulderSpan * 0.28) * FIT * FEM_HIP;
+    addEllipsoid(
+      root,
+      B.hips,
+      hp,
+      new THREE.Vector3(hr, torsoLen * 0.14 * FIT, hr * 0.82),
+      MAT.latex,
+      "Hips"
+    );
+  }
+
+  // Ворот / шея
+  if (B.neck) {
+    const np = worldPos(B.neck);
+    const nr = Math.max(shoulderSpan * 0.12, height * 0.028) * FIT;
+    addEllipsoid(
+      root,
+      B.neck,
+      np,
+      new THREE.Vector3(nr, height * 0.03 * FIT, nr * 0.9),
+      MAT.gloss,
+      "Collar"
     );
   }
 
   // =========================================================
-  // РУКАВА — длинные, свободные + манжеты
+  // РУКАВА — обтягивающие
   // =========================================================
 
   for (const side of ["left", "right"]) {
@@ -295,155 +332,220 @@ export function attachXbotOutfit(root) {
     const hand = B[`${side}Hand`];
 
     if (shoulder && arm) {
-      addSleeve(root, shoulder, arm, 0.3, 0.28, MAT.pj, `${side}SleeveUpper`);
-      // Плечевой объём свитшота
+      addSegment(root, shoulder, arm, 0.2, 0.18, MAT.latex, `${side}UpperArm`);
       const sp = worldPos(shoulder);
-      const g = Math.max(boneLen(shoulder, arm) * 0.32, height * 0.032) * LOOSE;
+      const g = Math.max(boneLen(shoulder, arm) * 0.22, height * 0.025) * FIT;
       addEllipsoid(
         root,
         shoulder,
         sp,
-        new THREE.Vector3(g * 1.15, g, g * 1.1),
-        MAT.pjLight,
-        `${side}ShoulderVolume`
+        new THREE.Vector3(g, g * 0.9, g),
+        MAT.latexSoft,
+        `${side}Shoulder`
       );
     }
 
     if (arm && forearm) {
-      addSleeve(root, arm, forearm, 0.28, 0.26, MAT.pj, `${side}SleeveFore`);
+      addSegment(root, arm, forearm, 0.18, 0.16, MAT.latex, `${side}ForeArm`);
     }
 
-    // Манжета у запястья (не перчатка)
     if (forearm && hand) {
-      addSleeve(root, forearm, hand, 0.22, 0.2, MAT.cuff, `${side}Cuff`);
+      addSegment(root, forearm, hand, 0.15, 0.14, MAT.gloss, `${side}Glove`);
     }
   }
 
   // =========================================================
-  // ШТАНЫ — свободные, с лёгким заужением к щиколотке
+  // НОГИ — обтяжка + силуэтные туфли
   // =========================================================
 
   for (const side of ["left", "right"]) {
     const thigh = B[`${side}UpLeg`];
     const shin = B[`${side}Leg`];
     const foot = B[`${side}Foot`];
+    const toe = B[`${side}Toe`];
 
     if (thigh && shin) {
-      addSleeve(root, thigh, shin, 0.28, 0.26, MAT.pj, `${side}PantThigh`);
+      addSegment(
+        root,
+        thigh,
+        shin,
+        0.22 * FEM_HIP,
+        0.2 * FEM_HIP,
+        MAT.latex,
+        `${side}Thigh`
+      );
     }
 
     if (shin && foot) {
-      addSleeve(root, shin, foot, 0.24, 0.22, MAT.pjDark, `${side}PantShin`);
-      // Манжета штанины
-      addSleeve(root, shin, foot, 0.2, 0.18, MAT.cuff, `${side}PantCuff`);
+      addSegment(root, shin, foot, 0.16, 0.15, MAT.latexDeep, `${side}Shin`);
+    }
+
+    if (foot) {
+      const fp = worldPos(foot);
+      const toeP = toe
+        ? worldPos(toe)
+        : fp.clone().add(forward.clone().multiplyScalar(height * 0.04));
+      const footLen = Math.max(fp.distanceTo(toeP), height * 0.04);
+
+      const shoe = fp
+        .clone()
+        .add(forward.clone().multiplyScalar(footLen * 0.4))
+        .add(new THREE.Vector3(0, -height * 0.006, 0));
+
+      addEllipsoid(
+        root,
+        foot,
+        shoe,
+        new THREE.Vector3(
+          footLen * 0.38 * FIT,
+          height * 0.018 * FIT,
+          footLen * 0.72 * FIT
+        ),
+        MAT.gloss,
+        `${side}Shoe`
+      );
+
+      const sole = shoe.clone().add(new THREE.Vector3(0, -height * 0.012, 0));
+      addEllipsoid(
+        root,
+        foot,
+        sole,
+        new THREE.Vector3(footLen * 0.4 * FIT, height * 0.007, footLen * 0.74 * FIT),
+        MAT.latexDeep,
+        `${side}Sole`
+      );
     }
   }
 
-  // Пояс / резинка (тонкая, не «кожаный ремень»)
-  if (B.hips) {
-    const hp = worldPos(B.hips);
-    const bx = Math.max(torsoLen * 0.4, shoulderSpan * 0.3) * LOOSE;
-    const bz = Math.max(torsoLen * 0.32, shoulderSpan * 0.22) * LOOSE;
-    addEllipsoid(
-      root,
-      B.hips,
-      hp,
-      new THREE.Vector3(bx, height * 0.018 * LOOSE, bz),
-      MAT.cuff,
-      "Waistband"
-    );
-  }
-
   // =========================================================
-  // СИЛУЭТНЫЕ ТАПОЧКИ (не сапоги)
-  // =========================================================
-
-  for (const side of ["left", "right"]) {
-    const foot = B[`${side}Foot`];
-    const toe = B[`${side}Toe`];
-    if (!foot) continue;
-
-    const fp = worldPos(foot);
-    const toeP = toe ? worldPos(toe) : fp.clone().add(forward.clone().multiplyScalar(height * 0.04));
-    const footLen = Math.max(fp.distanceTo(toeP), height * 0.045);
-
-    // Мягкий верх тапочка
-    const slipCenter = fp
-      .clone()
-      .add(forward.clone().multiplyScalar(footLen * 0.35))
-      .add(new THREE.Vector3(0, -height * 0.008, 0));
-
-    addEllipsoid(
-      root,
-      foot,
-      slipCenter,
-      new THREE.Vector3(
-        footLen * 0.42 * LOOSE,
-        height * 0.022 * LOOSE,
-        footLen * 0.7 * LOOSE
-      ),
-      MAT.slipper,
-      `${side}Slipper`
-    );
-
-    // Тонкая подошва
-    const soleCenter = slipCenter.clone().add(new THREE.Vector3(0, -height * 0.016, 0));
-    addEllipsoid(
-      root,
-      foot,
-      soleCenter,
-      new THREE.Vector3(
-        footLen * 0.44 * LOOSE,
-        height * 0.008,
-        footLen * 0.72 * LOOSE
-      ),
-      MAT.sole,
-      `${side}Sole`
-    );
-  }
-
-  // =========================================================
-  // ВОЛОСЫ / ЛИЦО (лёгкий силуэт, без «маски»)
+  // ВОЛОСЫ — женственный объём
   // =========================================================
 
   if (B.head) {
     const hp = worldPos(B.head);
     const neckHead = boneLen(B.neck, B.head) || height * 0.08;
-    const hr = Math.max(neckHead * 0.9, height * 0.055) * 1.12;
+    const hr = Math.max(neckHead * 0.95, height * 0.058);
 
+    // Макушка
     addEllipsoid(
       root,
       B.head,
-      hp.clone().add(new THREE.Vector3(0, hr * 0.4, 0)),
-      new THREE.Vector3(hr * 1.0, hr * 0.65, hr * 1.05),
+      hp.clone().add(new THREE.Vector3(0, hr * 0.55, 0)),
+      new THREE.Vector3(hr * 1.05, hr * 0.7, hr * 1.1),
       MAT.hair,
-      "Hair"
+      "HairTop"
     );
 
-    const face = hp.clone().add(forward.clone().multiplyScalar(hr * 0.65));
+    // Боковые волны
     const right = new THREE.Vector3().crossVectors(forward, UP).normalize();
-
     for (const s of [-1, 1]) {
       addEllipsoid(
         root,
         B.head,
-        face
+        hp
           .clone()
-          .add(right.clone().multiplyScalar(s * hr * 0.28))
-          .add(new THREE.Vector3(0, hr * 0.08, 0)),
-        new THREE.Vector3(hr * 0.11, hr * 0.08, hr * 0.07),
-        MAT.eyes,
-        "Eye"
+          .add(right.clone().multiplyScalar(s * hr * 0.75))
+          .add(new THREE.Vector3(0, hr * 0.05, 0))
+          .add(forward.clone().multiplyScalar(-hr * 0.15)),
+        new THREE.Vector3(hr * 0.45, hr * 0.9, hr * 0.5),
+        MAT.hair,
+        s < 0 ? "HairL" : "HairR"
       );
     }
 
+    // Длина сзади
     addEllipsoid(
       root,
       B.head,
-      face.clone().add(forward.clone().multiplyScalar(hr * 0.08)),
-      new THREE.Vector3(hr * 0.12, hr * 0.14, hr * 0.12),
+      hp
+        .clone()
+        .add(forward.clone().multiplyScalar(-hr * 0.55))
+        .add(new THREE.Vector3(0, -hr * 0.35, 0)),
+      new THREE.Vector3(hr * 0.7, hr * 1.15, hr * 0.55),
+      MAT.hairShine,
+      "HairBack"
+    );
+
+    // =========================================================
+    // ЛИЦО — женственные черты
+    // =========================================================
+
+    const face = hp.clone().add(forward.clone().multiplyScalar(hr * 0.72));
+
+    // Овал лица (лёгкий)
+    addEllipsoid(
+      root,
+      B.head,
+      face.clone().add(new THREE.Vector3(0, -hr * 0.05, 0)),
+      new THREE.Vector3(hr * 0.55, hr * 0.65, hr * 0.28),
+      MAT.skinSoft,
+      "Face"
+    );
+
+    // Глаза
+    for (const s of [-1, 1]) {
+      const eyeC = face
+        .clone()
+        .add(right.clone().multiplyScalar(s * hr * 0.28))
+        .add(new THREE.Vector3(0, hr * 0.12, 0));
+
+      addEllipsoid(
+        root,
+        B.head,
+        eyeC,
+        new THREE.Vector3(hr * 0.14, hr * 0.09, hr * 0.06),
+        MAT.eyeWhite,
+        s < 0 ? "EyeWL" : "EyeWR"
+      );
+      addEllipsoid(
+        root,
+        B.head,
+        eyeC.clone().add(forward.clone().multiplyScalar(hr * 0.02)),
+        new THREE.Vector3(hr * 0.08, hr * 0.08, hr * 0.05),
+        MAT.iris,
+        s < 0 ? "IrisL" : "IrisR"
+      );
+      addEllipsoid(
+        root,
+        B.head,
+        eyeC.clone().add(forward.clone().multiplyScalar(hr * 0.035)),
+        new THREE.Vector3(hr * 0.035, hr * 0.035, hr * 0.03),
+        MAT.pupil,
+        s < 0 ? "PupilL" : "PupilR"
+      );
+
+      // Бровь
+      addEllipsoid(
+        root,
+        B.head,
+        eyeC.clone().add(new THREE.Vector3(0, hr * 0.12, 0)),
+        new THREE.Vector3(hr * 0.12, hr * 0.025, hr * 0.03),
+        MAT.brow,
+        s < 0 ? "BrowL" : "BrowR"
+      );
+    }
+
+    // Нос
+    addEllipsoid(
+      root,
+      B.head,
+      face.clone().add(forward.clone().multiplyScalar(hr * 0.1)),
+      new THREE.Vector3(hr * 0.09, hr * 0.14, hr * 0.1),
       MAT.skin,
       "Nose"
+    );
+
+    // Губы
+    addEllipsoid(
+      root,
+      B.head,
+      face
+        .clone()
+        .add(new THREE.Vector3(0, -hr * 0.28, 0))
+        .add(forward.clone().multiplyScalar(hr * 0.08)),
+      new THREE.Vector3(hr * 0.16, hr * 0.05, hr * 0.06),
+      MAT.lip,
+      "Lips"
     );
   }
 
@@ -454,13 +556,13 @@ export function attachXbotOutfit(root) {
     if (o.name && o.name.startsWith(TAG)) outfitParts++;
   });
 
-  console.log("[AstraWay] Pajama outfit created", {
+  console.log("[AstraWay] Latex outfit created", {
     height,
     torsoLen,
     shoulderSpan,
     bonesFound: Object.values(B).filter(Boolean).length,
     outfitParts,
-    loose: LOOSE,
+    fit: FIT,
   });
 
   return true;
