@@ -1,52 +1,113 @@
 
 import * as THREE from "three";
 
-const PREFIX = "AstraWay_TestOutfit";
+const PREFIX = "AstraWay_SkinnedOutfit";
 
-const MATERIALS = {
-  jacket: new THREE.MeshStandardMaterial({
+const MATERIALS = [
+  new THREE.MeshStandardMaterial({
+    name: "AstraWay_Jacket",
     color: 0x245d91,
-    roughness: 0.82,
+    roughness: 0.84,
     side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
   }),
-  pants: new THREE.MeshStandardMaterial({
-    color: 0x9a7545,
+  new THREE.MeshStandardMaterial({
+    name: "AstraWay_Trousers",
+    color: 0x987044,
     roughness: 0.9,
     side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
   }),
-  leather: new THREE.MeshStandardMaterial({
+  new THREE.MeshStandardMaterial({
+    name: "AstraWay_Leather",
     color: 0x38271f,
     roughness: 0.86,
     side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
   }),
+];
+
+const BONE_GROUPS = {
+  torso: new Set([
+    "Hips",
+    "Spine",
+    "Spine1",
+    "Spine2",
+  ]),
+
+  arms: new Set([
+    "LeftShoulder",
+    "LeftArm",
+    "LeftForeArm",
+    "RightShoulder",
+    "RightArm",
+    "RightForeArm",
+  ]),
+
+  hands: new Set([
+    "LeftHand",
+    "RightHand",
+    "LeftHandThumb1",
+    "LeftHandThumb2",
+    "LeftHandThumb3",
+    "LeftHandIndex1",
+    "LeftHandIndex2",
+    "LeftHandIndex3",
+    "LeftHandMiddle1",
+    "LeftHandMiddle2",
+    "LeftHandMiddle3",
+    "LeftHandRing1",
+    "LeftHandRing2",
+    "LeftHandRing3",
+    "LeftHandPinky1",
+    "LeftHandPinky2",
+    "LeftHandPinky3",
+    "RightHandThumb1",
+    "RightHandThumb2",
+    "RightHandThumb3",
+    "RightHandIndex1",
+    "RightHandIndex2",
+    "RightHandIndex3",
+    "RightHandMiddle1",
+    "RightHandMiddle2",
+    "RightHandMiddle3",
+    "RightHandRing1",
+    "RightHandRing2",
+    "RightHandRing3",
+    "RightHandPinky1",
+    "RightHandPinky2",
+    "RightHandPinky3",
+  ]),
+
+  legs: new Set([
+    "LeftUpLeg",
+    "LeftLeg",
+    "RightUpLeg",
+    "RightLeg",
+  ]),
+
+  feet: new Set([
+    "LeftFoot",
+    "RightFoot",
+    "LeftToeBase",
+    "RightToeBase",
+  ]),
 };
-
-function findBone(root, name) {
-  let result = null;
-
-  root.traverse((object) => {
-    if (object.isBone && object.name === name) {
-      result = object;
-    }
-  });
-
-  return result;
-}
-
-function boneDistance(a, b) {
-  if (!a || !b) return 0;
-
-  const pa = a.getWorldPosition(new THREE.Vector3());
-  const pb = b.getWorldPosition(new THREE.Vector3());
-
-  return pa.distanceTo(pb);
-}
 
 function removePreviousOutfit(root) {
   const removals = [];
 
   root.traverse((object) => {
-    if (object.isMesh && object.name.startsWith(PREFIX)) {
+    if (
+      object.isSkinnedMesh &&
+      object.name.startsWith(PREFIX)
+    ) {
       removals.push(object);
     }
   });
@@ -57,188 +118,367 @@ function removePreviousOutfit(root) {
   }
 }
 
-function addSegment(root, startName, endName, ratio, material) {
-  const start = findBone(root, startName);
-  const end = findBone(root, endName);
+function readInfluence(
+  vertexIndex,
+  skinIndex,
+  skinWeight,
+  bones
+) {
+  const result = {
+    torso: 0,
+    arms: 0,
+    hands: 0,
+    legs: 0,
+    feet: 0,
+  };
 
-  if (!start || !end) return false;
+  for (let slot = 0; slot < 4; slot++) {
+    const boneIndex = skinIndex.getComponent(
+      vertexIndex,
+      slot
+    );
 
-  root.updateMatrixWorld(true);
+    const weight = skinWeight.getComponent(
+      vertexIndex,
+      slot
+    );
 
-  const endWorld = end.getWorldPosition(new THREE.Vector3());
-  const endLocal = start.worldToLocal(endWorld.clone());
+    if (weight <= 0) continue;
 
-  const length = endLocal.length();
+    const bone = bones[boneIndex];
+    if (!bone) continue;
 
-  if (!Number.isFinite(length) || length < 0.005) {
-    return false;
+    const name = bone.name;
+
+    if (BONE_GROUPS.torso.has(name)) {
+      result.torso += weight;
+    } else if (BONE_GROUPS.hands.has(name)) {
+      result.hands += weight;
+    } else if (BONE_GROUPS.arms.has(name)) {
+      result.arms += weight;
+    } else if (BONE_GROUPS.feet.has(name)) {
+      result.feet += weight;
+    } else if (BONE_GROUPS.legs.has(name)) {
+      result.legs += weight;
+    }
   }
 
-  const radius = Math.min(length * ratio, length * 0.42);
-  const cylinderLength = Math.max(length - radius * 2, 0.001);
-
-  const geometry = new THREE.CapsuleGeometry(
-    radius,
-    cylinderLength,
-    5,
-    12
-  );
-
-  const mesh = new THREE.Mesh(geometry, material);
-
-  mesh.name = `${PREFIX}_${startName}_${endName}`;
-  mesh.position.copy(endLocal).multiplyScalar(0.5);
-
-  mesh.quaternion.setFromUnitVectors(
-    new THREE.Vector3(0, 1, 0),
-    endLocal.clone().normalize()
-  );
-
-  mesh.scale.z = 0.82;
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  mesh.frustumCulled = false;
-
-  start.add(mesh);
-
-  return true;
+  return result;
 }
 
-function addTorsoSection(root, startName, endName, width, material) {
-  const start = findBone(root, startName);
-  const end = findBone(root, endName);
+function classifyTriangle(a, b, c) {
+  const torso = a.torso + b.torso + c.torso;
+  const arms = a.arms + b.arms + c.arms;
+  const hands = a.hands + b.hands + c.hands;
+  const legs = a.legs + b.legs + c.legs;
+  const feet = a.feet + b.feet + c.feet;
 
-  if (!start || !end || width <= 0) return false;
+  const upperBody = torso + arms + hands;
+  const lowerBody = legs + feet;
 
-  root.updateMatrixWorld(true);
+  if (upperBody > lowerBody && upperBody > 0.12) {
+    if (hands > arms * 0.55) return 2;
+    return 0;
+  }
 
-  const endWorld = end.getWorldPosition(new THREE.Vector3());
-  const endLocal = start.worldToLocal(endWorld.clone());
-  const length = endLocal.length();
+  if (lowerBody > upperBody && lowerBody > 0.12) {
+    if (feet > legs * 0.45) return 2;
+    return 1;
+  }
 
-  if (length < 0.005) return false;
+  return -1;
+}
 
-  const geometry = new THREE.SphereGeometry(1, 16, 12);
-  const mesh = new THREE.Mesh(geometry, material);
+function createOutfitGeometry(source, skeleton) {
+  const original = source.geometry;
 
-  mesh.name = `${PREFIX}_Torso_${startName}`;
-  mesh.position.copy(endLocal).multiplyScalar(0.5);
+  const skinIndex = original.getAttribute("skinIndex");
+  const skinWeight = original.getAttribute("skinWeight");
 
-  mesh.quaternion.setFromUnitVectors(
-    new THREE.Vector3(0, 1, 0),
-    endLocal.clone().normalize()
+  if (!skinIndex || !skinWeight) {
+    return null;
+  }
+
+  const geometry = original.index
+    ? original.toNonIndexed()
+    : original.clone();
+
+  if (!geometry.getAttribute("normal")) {
+    geometry.computeVertexNormals();
+  }
+
+  const position = geometry.getAttribute("position");
+  const normal = geometry.getAttribute("normal");
+  const indices = geometry.getAttribute("skinIndex");
+  const weights = geometry.getAttribute("skinWeight");
+
+  if (!position || !normal) {
+    if (geometry !== original) geometry.dispose();
+    return null;
+  }
+
+  geometry.computeBoundingBox();
+
+  const bounds = geometry.boundingBox;
+  const height = bounds
+    ? bounds.max.y - bounds.min.y
+    : 1;
+
+  const offset = Math.max(height * 0.004, 0.001);
+
+  const buckets = [[], [], []];
+
+  const vertexCount = position.count;
+
+  let classifiedTriangles = 0;
+
+  for (let i = 0; i + 2 < vertexCount; i += 3) {
+    const influences = [
+      readInfluence(i, indices, weights, skeleton.bones),
+      readInfluence(i + 1, indices, weights, skeleton.bones),
+      readInfluence(i + 2, indices, weights, skeleton.bones),
+    ];
+
+    const materialIndex = classifyTriangle(
+      influences[0],
+      influences[1],
+      influences[2]
+    );
+
+    if (materialIndex < 0) continue;
+
+    classifiedTriangles++;
+
+    const bucket = buckets[materialIndex];
+
+    for (let vertex = 0; vertex < 3; vertex++) {
+      const index = i + vertex;
+
+      const p = new THREE.Vector3(
+        position.getX(index),
+        position.getY(index),
+        position.getZ(index)
+      );
+
+      const n = new THREE.Vector3(
+        normal.getX(index),
+        normal.getY(index),
+        normal.getZ(index)
+      ).normalize();
+
+      p.addScaledVector(n, offset);
+
+      bucket.push(
+        p.x, p.y, p.z,
+        n.x, n.y, n.z,
+
+        indices.getX(index),
+        indices.getY(index),
+        indices.getZ(index),
+        indices.getW(index),
+
+        weights.getX(index),
+        weights.getY(index),
+        weights.getZ(index),
+        weights.getW(index)
+      );
+    }
+  }
+
+  if (geometry !== original) {
+    geometry.dispose();
+  }
+
+  if (!classifiedTriangles) return null;
+
+  const output = new THREE.BufferGeometry();
+
+  const positions = [];
+  const normals = [];
+  const skinIndices = [];
+  const skinWeights = [];
+
+  let offsetVertex = 0;
+
+  for (let materialIndex = 0; materialIndex < 3; materialIndex++) {
+    const bucket = buckets[materialIndex];
+
+    if (!bucket.length) continue;
+
+    const start = offsetVertex;
+    const vertexTotal = bucket.length / 13;
+
+    for (let i = 0; i < bucket.length; i += 13) {
+      positions.push(
+        bucket[i],
+        bucket[i + 1],
+        bucket[i + 2]
+      );
+
+      normals.push(
+        bucket[i + 3],
+        bucket[i + 4],
+        bucket[i + 5]
+      );
+
+      skinIndices.push(
+        bucket[i + 6],
+        bucket[i + 7],
+        bucket[i + 8],
+        bucket[i + 9]
+      );
+
+      skinWeights.push(
+        bucket[i + 10],
+        bucket[i + 11],
+        bucket[i + 12],
+        bucket[i + 13]
+      );
+    }
+
+    output.addGroup(
+      start,
+      vertexTotal,
+      materialIndex
+    );
+
+    offsetVertex += vertexTotal;
+  }
+
+  output.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3)
   );
 
-  mesh.scale.set(
-    width * 0.46,
-    length * 0.72,
-    width * 0.34
+  output.setAttribute(
+    "normal",
+    new THREE.Float32BufferAttribute(normals, 3)
   );
 
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  mesh.frustumCulled = false;
+  output.setAttribute(
+    "skinIndex",
+    new THREE.Uint16BufferAttribute(skinIndices, 4)
+  );
 
-  start.add(mesh);
+  output.setAttribute(
+    "skinWeight",
+    new THREE.Float32BufferAttribute(skinWeights, 4)
+  );
 
-  return true;
+  output.computeBoundingBox();
+  output.computeBoundingSphere();
+
+  return {
+    geometry: output,
+    triangles: classifiedTriangles,
+  };
+}
+
+function createSkinnedOutfit(source, root) {
+  const skeleton = source.skeleton;
+
+  if (!skeleton?.bones?.length) {
+    return null;
+  }
+
+  const result = createOutfitGeometry(source, skeleton);
+
+  if (!result) return null;
+
+  const outfit = new THREE.SkinnedMesh(
+    result.geometry,
+    MATERIALS
+  );
+
+  outfit.name = `${PREFIX}_${source.name || "Body"}`;
+
+  outfit.bindMode = source.bindMode;
+
+  outfit.bind(
+    skeleton,
+    source.bindMatrix
+  );
+
+  outfit.position.copy(source.position);
+  outfit.quaternion.copy(source.quaternion);
+  outfit.scale.copy(source.scale);
+
+  outfit.matrixAutoUpdate = source.matrixAutoUpdate;
+
+  if (!source.matrixAutoUpdate) {
+    outfit.matrix.copy(source.matrix);
+  }
+
+  outfit.castShadow = true;
+  outfit.receiveShadow = true;
+  outfit.frustumCulled = false;
+  outfit.renderOrder = source.renderOrder + 1;
+
+  const parent = source.parent || root;
+  parent.add(outfit);
+
+  return {
+    mesh: outfit,
+    triangles: result.triangles,
+  };
 }
 
 export function attachXbotOutfit(root) {
-  if (!root) {
-    throw new Error("XBot outfit: model root is missing");
+  if (!root?.isObject3D) {
+    throw new Error("XBot outfit: invalid model root");
   }
 
   root.updateMatrixWorld(true);
   removePreviousOutfit(root);
 
-  const required = [
-    "Hips",
-    "Spine",
-    "Spine2",
-    "LeftUpLeg",
-    "RightUpLeg",
-    "LeftLeg",
-    "RightLeg",
-    "LeftFoot",
-    "RightFoot",
-  ];
+  const sources = [];
 
-  const missing = required.filter((name) => !findBone(root, name));
+  root.traverse((object) => {
+    if (
+      object.isSkinnedMesh &&
+      !object.name.startsWith(PREFIX)
+    ) {
+      sources.push(object);
+    }
+  });
 
-  if (missing.length) {
+  if (!sources.length) {
     throw new Error(
-      `XBot outfit: missing bones: ${missing.join(", ")}`
+      "XBot outfit: no source SkinnedMesh found"
     );
   }
 
-  const leftShoulder = findBone(root, "LeftShoulder");
-  const rightShoulder = findBone(root, "RightShoulder");
+  let createdMeshes = 0;
+  let classifiedTriangles = 0;
+  let skippedMeshes = 0;
 
-  const shoulderWidth = boneDistance(
-    leftShoulder,
-    rightShoulder
-  );
+  for (const source of sources) {
+    const result = createSkinnedOutfit(source, root);
 
-  const leftUpperLegLength = boneDistance(
-    findBone(root, "LeftUpLeg"),
-    findBone(root, "LeftLeg")
-  );
+    if (!result) {
+      skippedMeshes++;
+      continue;
+    }
 
-  const rightUpperLegLength = boneDistance(
-    findBone(root, "RightUpLeg"),
-    findBone(root, "RightLeg")
-  );
-
-  const referenceWidth = shoulderWidth > 0.01
-    ? shoulderWidth
-    : Math.max(leftUpperLegLength, rightUpperLegLength) * 0.85;
-
-  let created = 0;
-
-  const add = (...args) => {
-    if (addSegment(root, ...args)) created++;
-  };
-
-  // Куртка: ширина рассчитывается по плечевому поясу.
-  if (addTorsoSection(
-    root, "Hips", "Spine", referenceWidth, MATERIALS.jacket
-  )) created++;
-
-  if (addTorsoSection(
-    root, "Spine", "Spine2", referenceWidth, MATERIALS.jacket
-  )) created++;
-
-  // Рукава.
-  add("LeftShoulder", "LeftArm", 0.19, MATERIALS.jacket);
-  add("RightShoulder", "RightArm", 0.19, MATERIALS.jacket);
-
-  add("LeftArm", "LeftForeArm", 0.17, MATERIALS.jacket);
-  add("RightArm", "RightForeArm", 0.17, MATERIALS.jacket);
-
-  // Кожаные манжеты и перчатки.
-  add("LeftForeArm", "LeftHand", 0.15, MATERIALS.leather);
-  add("RightForeArm", "RightHand", 0.15, MATERIALS.leather);
-
-  // Брюки.
-  add("LeftUpLeg", "LeftLeg", 0.19, MATERIALS.pants);
-  add("RightUpLeg", "RightLeg", 0.19, MATERIALS.pants);
-
-  add("LeftLeg", "LeftFoot", 0.16, MATERIALS.pants);
-  add("RightLeg", "RightFoot", 0.16, MATERIALS.pants);
-
-  // Обувь — по реальной длине стопы.
-  add("LeftFoot", "LeftToeBase", 0.25, MATERIALS.leather);
-  add("RightFoot", "RightToeBase", 0.25, MATERIALS.leather);
+    createdMeshes++;
+    classifiedTriangles += result.triangles;
+  }
 
   root.updateMatrixWorld(true);
 
-  console.log("[AstraWay Outfit] ATTACHED", {
-    createdParts: created,
-    shoulderWidth: Number(shoulderWidth.toFixed(4)),
-    leftUpperLegLength: Number(leftUpperLegLength.toFixed(4)),
-    rightUpperLegLength: Number(rightUpperLegLength.toFixed(4)),
+  console.log("[AstraWay Outfit] SKINNED OUTFIT", {
+    sourceMeshes: sources.length,
+    createdMeshes,
+    skippedMeshes,
+    classifiedTriangles,
+    method: "geometry + skinIndex + skinWeight",
   });
 
-  return created > 0;
+  if (!createdMeshes || !classifiedTriangles) {
+    throw new Error(
+      "XBot outfit: no weighted clothing geometry generated"
+    );
+  }
+
+  return true;
 }
