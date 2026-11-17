@@ -1,4 +1,3 @@
-
 import * as THREE from "three";
 
 const STATE = Object.freeze({
@@ -152,10 +151,14 @@ export class AutonomyAgent {
       return this.getState();
     }
 
-    const delta = Math.min(dt, 0.1);
+    // Передаём backend реальное время кадра.
+    // Сам locomotion backend выполняет внутреннее ограничение
+    // времени и разбиение на подшаги.
+    this.human.update(dt);
 
-    // Единственное место обновления locomotion backend.
-    this.human.update(delta);
+    // Таймеры агента не должны перескакивать после возврата
+    // Safari из фона или длительной паузы вкладки.
+    const delta = Math.min(dt, 0.25);
 
     if (
       !this.goal ||
