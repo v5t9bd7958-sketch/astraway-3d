@@ -1,5 +1,7 @@
+
 export const TASK_TYPE = Object.freeze({
   CONTACT_MAINTAIN: "contact_maintain",
+  EFFECTOR_POSITION: "effector_position",
 });
 
 export const TASK_PRIORITY = Object.freeze({
@@ -22,54 +24,28 @@ export class Task {
     metadata = null,
   }) {
     if (!id) {
-      throw new Error(
-        "Task: id required"
-      );
+      throw new Error("Task: id required");
     }
 
     if (!type) {
-      throw new Error(
-        `Task ${id}: type required`
-      );
+      throw new Error(`Task ${id}: type required`);
     }
 
     this.id = id;
     this.type = type;
-
-    /*
-     * Кто породил задачу.
-     *
-     * Например:
-     * contact_foot_L
-     */
     this.source = source;
 
-    /*
-     * Целевое положение задачи.
-     *
-     * Task хранит данные задачи,
-     * но НЕ изменяет Skeleton.
-     */
     this.target = target
-      ? target.clone()
+      ? target.clone?.() ?? target
       : null;
 
-    this.priority =
-      priority;
-
-    this.weight =
-      weight;
-
-    this.hard =
-      hard;
-
-    this.enabled =
-      enabled;
-
-    this.metadata =
-      metadata
-        ? { ...metadata }
-        : {};
+    this.priority = priority;
+    this.weight = weight;
+    this.hard = hard;
+    this.enabled = enabled;
+    this.metadata = metadata
+      ? { ...metadata }
+      : {};
   }
 
   enable() {
@@ -83,32 +59,20 @@ export class Task {
   }
 
   setWeight(weight) {
-    if (
-      !Number.isFinite(weight) ||
-      weight < 0
-    ) {
-      throw new Error(
-        `Task ${this.id}: invalid weight`
-      );
+    if (!Number.isFinite(weight) || weight < 0) {
+      throw new Error(`Task ${this.id}: invalid weight`);
     }
 
     this.weight = weight;
-
     return this;
   }
 
   setPriority(priority) {
-    if (
-      !Number.isFinite(priority)
-    ) {
-      throw new Error(
-        `Task ${this.id}: invalid priority`
-      );
+    if (!Number.isFinite(priority)) {
+      throw new Error(`Task ${this.id}: invalid priority`);
     }
 
-    this.priority =
-      priority;
-
+    this.priority = priority;
     return this;
   }
 
@@ -117,20 +81,12 @@ export class Task {
       id: this.id,
       type: this.type,
       source: this.source,
-      target: this.target
-        ? this.target.clone()
-        : null,
-      priority:
-        this.priority,
-      weight:
-        this.weight,
-      hard:
-        this.hard,
-      enabled:
-        this.enabled,
-      metadata: {
-        ...this.metadata,
-      },
+      target: this.target?.clone?.() ?? this.target,
+      priority: this.priority,
+      weight: this.weight,
+      hard: this.hard,
+      enabled: this.enabled,
+      metadata: { ...this.metadata },
     };
   }
 }
