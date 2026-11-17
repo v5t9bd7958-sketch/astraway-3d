@@ -5,6 +5,7 @@ import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { canonicalizeGLBBones } from "@three-ws/retarget";
 import { createProceduralHuman } from "three-procedural-locomotion";
 import { WorldAdapter } from "./world/WorldAdapter.js";
+import { AutonomyAgent } from "./character/AutonomyAgent.js";
 
 const canvas = document.querySelector("#viewer");
 const status = document.querySelector("#status");
@@ -22,26 +23,22 @@ function setStatus(message) {
 
 const xbotMapping = {
   hips: "Hips",
-
   left: {
     thigh: "LeftUpLeg",
     shin: "LeftLeg",
     foot: "LeftFoot",
     toe: "LeftToeBase",
   },
-
   right: {
     thigh: "RightUpLeg",
     shin: "RightLeg",
     foot: "RightFoot",
     toe: "RightToeBase",
   },
-
   spine: "Spine",
   chest: "Spine2",
   neck: "Neck",
   head: "Head",
-
   leftArm: {
     shoulder: "LeftShoulder",
     upperArm: "LeftArm",
@@ -55,7 +52,6 @@ const xbotMapping = {
       pinky: ["LeftHandPinky1", "LeftHandPinky2", "LeftHandPinky3"],
     },
   },
-
   rightArm: {
     shoulder: "RightShoulder",
     upperArm: "RightArm",
@@ -174,6 +170,7 @@ loader.setMeshoptDecoder(MeshoptDecoder);
 const MODEL_URL = `${import.meta.env.BASE_URL}models/Xbot.glb`;
 
 let human = null;
+let autonomyAgent = null;
 let characterRoot = null;
 let worldAdapter = null;
 
@@ -474,6 +471,11 @@ let styleIndex = 0;
 
 const runButton = makeButton("БЕГ: OFF", () => {
   runEnabled = !runEnabled;
+
+  if (autonomyAgent) {
+    autonomyAgent.setMode(runEnabled ? "run" : "walk");
+  }
+
   runButton.setLabel(runEnabled ? "БЕГ: ON" : "БЕГ: OFF");
 
   setStatus(
@@ -509,7 +511,12 @@ const jumpButton = makeButton("ПРЫЖОК", () => {
 const stopButton = makeButton("СТОП", () => {
   if (!human) return;
 
-  human.stop();
+  if (autonomyAgent) {
+    autonomyAgent.stop();
+  } else {
+    human.stop();
+  }
+
   setStatus("ОСТАНОВКА");
 });
 
@@ -646,11 +653,6 @@ async function loadCharacter() {
 
     const stairYaw = Math.atan2(-forward.x, -forward.z);
 
-    /*
-     * Navigation obstacles.
-     * WorldAdapter derives collider descriptors from their geometry.
-     */
-
     const firstColumn = forward
       .clone()
       .multiplyScalar(2.35)
@@ -663,10 +665,6 @@ async function loadCharacter() {
 
     createColumn(firstColumn, 0.4, 1.8);
     createColumn(secondColumn, 0.34, 1.55);
-
-    /*
-     * Stairs and slope are registered as walkable geometry.
-     */
 
     const stairStart = forward
       .clone()
@@ -721,6 +719,11 @@ async function loadCharacter() {
     human.autoTouch = true;
     human.touchSlide = true;
 
+    autonomyAgent = new AutonomyAgent({
+      human,
+      worldAdapter,
+    });
+
     for (const warning of human.warnings) {
       console.warn("[AstraWay] MODEL WARNING:", warning);
     }
@@ -758,6 +761,7 @@ async function loadCharacter() {
       world: worldDiagnostics,
       stairHeight: staircase.height,
       stairLength: staircase.length,
+      autonomy: autonomyAgent.getState(),
     });
 
   } catch (error) {
@@ -770,14 +774,14 @@ async function loadCharacter() {
 }
 
 /* =========================================================
-   TAP → WORLD TARGET → NAVIGATION
+   TAP → WORLD TARGET → AUTONOMY AGENT
 ========================================================= */
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 
 function moveToScreenPoint(event) {
-  if (!human || !characterRoot) {
+  if (!human || !autonomyAgent || !characterRoot) {
     setStatus("Персонаж ещё загружается…");
     return;
   }
@@ -817,19 +821,19 @@ function moveToScreenPoint(event) {
   targetMarker.position.y += 0.025;
   targetMarker.visible = true;
 
-  human.moveTo(target, {
+  const agentState = autonomyAgent.setGoal(target, {
     run: runEnabled,
   });
 
   setStatus(
-    `${runEnabled ? "БЕГ" : "ХОДЬБА"} · МАРШРУТ ПРИНЯТ\n` +
+    `${runEnabled ? "БЕГ" : "ХОДЬБА"} · ЦЕЛЬ ПРИНЯТА\n` +
     `Расстояние: ${distance.toFixed(2)} м`
   );
 
-  console.log("[AstraWay] MOVE TARGET", {
+  console.log("[AstraWay] AUTONOMY GOAL", {
     target: target.toArray(),
     distance,
-    run: runEnabled,
+    agentState,
     route: human.movePath?.map((p) => p.toArray()) ?? null,
   });
 }
@@ -854,13 +858,16 @@ canvas.addEventListener(
 let lastHudUpdate = 0;
 
 function updateHUD(now) {
-  if (!human || now - lastHudUpdate < 180) return;
+  if (!human || !autonomyAgent || now - lastHudUpdate < 180) {
+    return;
+  }
 
   lastHudUpdate = now;
 
   const route = human.movePath;
   const routeCount = route ? route.length : 0;
   const world = worldAdapter.getDiagnostics();
+  const autonomy = autonomyAgent.getState();
 
   const warnings = human.warnings.length
     ? `\nПРЕДУПРЕЖДЕНИЯ: ${human.warnings.length}`
@@ -868,13 +875,17 @@ function updateHUD(now) {
 
   status.textContent = [
     `ASTRAWAY · ${styles[styleIndex].toUpperCase()}`,
+    `Автономность: ${autonomy.state}`,
+    `Цель: ${autonomy.goal ? "АКТИВНА" : "НЕТ"}`,
+    `Режим: ${autonomy.mode.toUpperCase()}`,
     `Скорость: ${human.speed.toFixed(2)} м/с`,
-    `Режим: ${human.gaitMode} · бег: ${Math.round(human.runBlend * 100)}%`,
+    `Походка: ${human.gaitMode} · бег: ${Math.round(human.runBlend * 100)}%`,
     `Приседание: ${Math.round(human.crouch * 100)}%`,
     `Стопы: L ${human.footPhase("left")} · R ${human.footPhase("right")}`,
     `Прыжок: ${human.jumpPhase}`,
     `Руки: L ${human.touchPhase("left")} · R ${human.touchPhase("right")}`,
     `Точек маршрута: ${routeCount}`,
+    `Попытки восстановления: ${autonomy.recoveryAttempts}`,
     `Мир: пол ${world.groundCount} · препятствия ${world.colliderCount}`,
     `Автокасание: ${human.autoTouch ? "ON" : "OFF"}`,
     warnings,
@@ -899,9 +910,11 @@ function animate(now) {
 
   dt = Math.min(dt, 0.05);
 
-  if (human) {
+  if (human && autonomyAgent) {
     try {
-      human.update(dt);
+      // AutonomyAgent — единственный владелец human.update(dt).
+      autonomyAgent.update(dt);
+
       updateCamera();
       updateHUD(now);
     } catch (error) {
@@ -911,6 +924,7 @@ function animate(now) {
         "ОШИБКА ДВИЖЕНИЯ: " + error.message
       );
 
+      autonomyAgent = null;
       human = null;
     }
   }
