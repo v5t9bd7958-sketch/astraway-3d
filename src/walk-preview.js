@@ -1,3 +1,5 @@
+// src/walk-preview.js
+
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
@@ -6,6 +8,7 @@ import { createProceduralHuman } from "three-procedural-locomotion";
 import { WorldAdapter } from "./world/WorldAdapter.js";
 import { AutonomyAgent } from "./character/AutonomyAgent.js";
 import { attachXbotOutfit } from "./character/XbotOutfit.js";
+import { buildNightPlaza } from "./world/NightPlazaLocation.js";
 
 const canvas = document.querySelector("#viewer");
 const status = document.querySelector("#status");
@@ -68,12 +71,13 @@ const xbotMapping = {
 };
 
 /* =========================================================
-   SCENE
+   RENDERER / SCENE
 ========================================================= */
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
   antialias: true,
+  alpha: false,
   powerPreference: "high-performance",
 });
 
@@ -82,7 +86,7 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x090b10);
+scene.background = new THREE.Color(0x070a12);
 
 const camera = new THREE.PerspectiveCamera(
   38,
@@ -91,36 +95,26 @@ const camera = new THREE.PerspectiveCamera(
   150
 );
 
-scene.add(
-  new THREE.HemisphereLight(0xdde8ff, 0x20232b, 2.2)
-);
-
-const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
-keyLight.position.set(3, 7, 4);
-scene.add(keyLight);
-
-const fillLight = new THREE.DirectionalLight(0x8fa8ff, 0.9);
-fillLight.position.set(-4, 3, -3);
-scene.add(fillLight);
-
 /* =========================================================
-   GROUND
+   BASE GROUND (fallback under plaza)
 ========================================================= */
 
+const groundMeshes = [];
+const obstacleMeshes = [];
+
 const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(100, 100),
+  new THREE.PlaneGeometry(80, 80),
   new THREE.MeshStandardMaterial({
-    color: 0x151922,
-    roughness: 0.92,
+    color: 0x0b0e16,
+    roughness: 0.95,
   })
 );
-
 ground.rotation.x = -Math.PI / 2;
-ground.position.y = 0;
+ground.position.y = -0.02;
 ground.name = "WalkableGround";
+ground.visible = true;
 scene.add(ground);
-
-const groundMeshes = [ground];
+groundMeshes.push(ground);
 
 /* =========================================================
    TARGET MARKER
@@ -130,30 +124,27 @@ const targetMarker = new THREE.Group();
 targetMarker.visible = false;
 
 const markerRing = new THREE.Mesh(
-  new THREE.RingGeometry(0.13, 0.19, 40),
+  new THREE.RingGeometry(0.22, 0.32, 32),
   new THREE.MeshBasicMaterial({
-    color: 0x63d9ff,
-    side: THREE.DoubleSide,
+    color: 0x2ee6ff,
     transparent: true,
-    opacity: 0.95,
+    opacity: 0.9,
+    side: THREE.DoubleSide,
     depthWrite: false,
   })
 );
-
 markerRing.rotation.x = -Math.PI / 2;
-markerRing.position.y = 0.025;
 targetMarker.add(markerRing);
 
 const markerCenter = new THREE.Mesh(
-  new THREE.CircleGeometry(0.045, 24),
+  new THREE.CircleGeometry(0.08, 20),
   new THREE.MeshBasicMaterial({
-    color: 0xffffff,
+    color: 0xff3d9a,
     transparent: true,
     opacity: 0.9,
     depthWrite: false,
   })
 );
-
 markerCenter.rotation.x = -Math.PI / 2;
 markerCenter.position.y = 0.03;
 targetMarker.add(markerCenter);
@@ -169,20 +160,23 @@ loader.setMeshoptDecoder(MeshoptDecoder);
 
 const MODEL_URL = `${import.meta.env.BASE_URL}models/Xbot.glb`;
 
-let human = null;
-let autonomyAgent = null;
-let characterRoot = null;
-let worldAdapter = null;
-
 const UP = new THREE.Vector3(0, 1, 0);
 const forward = new THREE.Vector3(0, 0, -1);
 const right = new THREE.Vector3(1, 0, 0);
-
 const cameraOffset = new THREE.Vector3();
 const lookTarget = new THREE.Vector3();
 
+let characterRoot = null;
+let human = null;
+let worldAdapter = null;
+let autonomyAgent = null;
+
 function toArrayBuffer(value) {
-  if (value instanceof ArrayBuffer) return value;
+  if (!value) return null;
+
+  if (value instanceof ArrayBuffer) {
+    return value;
+  }
 
   if (ArrayBuffer.isView(value)) {
     return value.buffer.slice(
@@ -211,186 +205,16 @@ function findBone(root, name) {
 }
 
 /* =========================================================
-   ADAPTIVE WORLD GEOMETRY
-========================================================= */
-
-const obstacleMeshes = [];
-
-function createColumn(position, radius = 0.38, height = 1.8) {
-  const mesh = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius, radius, height, 24),
-    new THREE.MeshStandardMaterial({
-      color: 0x92704e,
-      roughness: 0.7,
-      metalness: 0.16,
-    })
-  );
-
-  mesh.position.set(
-    position.x,
-    height / 2,
-    position.z
-  );
-
-  mesh.name = "TouchableNavigationColumn";
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-
-  mesh.userData.astraWay = {
-    role: "obstacle",
-  };
-
-  scene.add(mesh);
-  obstacleMeshes.push(mesh);
-
-  return mesh;
-}
-
-function createStaircase(start, stairYaw) {
-  const count = 5;
-  const tread = 0.34;
-  const rise = 0.12;
-  const width = 2.6;
-
-  const material = new THREE.MeshStandardMaterial({
-    color: 0x394454,
-    roughness: 0.86,
-  });
-
-  for (let i = 0; i < count; i++) {
-    const height = rise * (i + 1);
-
-    const step = new THREE.Mesh(
-      new THREE.BoxGeometry(width, height, tread),
-      material
-    );
-
-    const position = start
-      .clone()
-      .add(forward.clone().multiplyScalar((i + 0.5) * tread));
-
-    step.position.set(
-      position.x,
-      height / 2,
-      position.z
-    );
-
-    step.rotation.y = stairYaw;
-    step.name = `AdaptiveStair_${i + 1}`;
-
-    scene.add(step);
-    groundMeshes.push(step);
-  }
-
-  const totalHeight = count * rise;
-
-  const landing = new THREE.Mesh(
-    new THREE.BoxGeometry(width, 0.2, 1.5),
-    material
-  );
-
-  const landingPosition = start
-    .clone()
-    .add(forward.clone().multiplyScalar(count * tread + 0.75));
-
-  landing.position.set(
-    landingPosition.x,
-    totalHeight - 0.1,
-    landingPosition.z
-  );
-
-  landing.rotation.y = stairYaw;
-  landing.name = "StairLanding";
-
-  scene.add(landing);
-  groundMeshes.push(landing);
-
-  return {
-    height: totalHeight,
-    length: count * tread,
-  };
-}
-
-function createRamp(start, rampYaw, rampHeight = 0.36, rampLength = 2.2) {
-  const width = 1.35;
-
-  const geometry = new THREE.BufferGeometry();
-
-  const vertices = new Float32Array([
-    -width / 2, 0, 0,
-     width / 2, 0, 0,
-    -width / 2, rampHeight, -rampLength,
-
-     width / 2, 0, 0,
-     width / 2, rampHeight, -rampLength,
-    -width / 2, rampHeight, -rampLength,
-  ]);
-
-  geometry.setAttribute(
-    "position",
-    new THREE.BufferAttribute(vertices, 3)
-  );
-
-  geometry.computeVertexNormals();
-
-  const ramp = new THREE.Mesh(
-    geometry,
-    new THREE.MeshStandardMaterial({
-      color: 0x45616b,
-      roughness: 0.82,
-      side: THREE.FrontSide,
-    })
-  );
-
-  ramp.position.copy(start);
-  ramp.rotation.y = rampYaw;
-  ramp.name = "AdaptiveSlope";
-
-  scene.add(ramp);
-  groundMeshes.push(ramp);
-
-  const landing = new THREE.Mesh(
-    new THREE.BoxGeometry(width, 0.18, 0.9),
-    new THREE.MeshStandardMaterial({
-      color: 0x394454,
-      roughness: 0.86,
-    })
-  );
-
-  const landingPosition = start
-    .clone()
-    .add(forward.clone().multiplyScalar(rampLength + 0.45));
-
-  landing.position.set(
-    landingPosition.x,
-    rampHeight - 0.09,
-    landingPosition.z
-  );
-
-  landing.rotation.y = rampYaw;
-  landing.name = "RampLanding";
-
-  scene.add(landing);
-  groundMeshes.push(landing);
-}
-
-/* =========================================================
    CAMERA
 ========================================================= */
 
 function updateCamera() {
   if (!human) return;
 
-  cameraOffset
-    .copy(forward)
-    .negate()
-    .multiplyScalar(5.1);
-
+  cameraOffset.copy(forward).negate().multiplyScalar(5.1);
   cameraOffset.y = 2.25;
 
-  camera.position
-    .copy(human.position)
-    .add(cameraOffset);
+  camera.position.copy(human.position).add(cameraOffset);
 
   lookTarget.copy(human.position);
   lookTarget.y += 1.0;
@@ -478,11 +302,7 @@ const runButton = makeButton("БЕГ: OFF", () => {
 
   runButton.setLabel(runEnabled ? "БЕГ: ON" : "БЕГ: OFF");
 
-  setStatus(
-    runEnabled
-      ? "РЕЖИМ БЕГА ВКЛЮЧЁН"
-      : "РЕЖИМ ХОДЬБЫ"
-  );
+  setStatus(runEnabled ? "РЕЖИМ БЕГА ВКЛЮЧЁН" : "РЕЖИМ ХОДЬБЫ");
 });
 
 const crouchButton = makeButton("ПРИСЕСТЬ", () => {
@@ -491,9 +311,7 @@ const crouchButton = makeButton("ПРИСЕСТЬ", () => {
   crouchEnabled = !crouchEnabled;
   human.targetCrouch = crouchEnabled ? 1 : 0;
 
-  crouchButton.setLabel(
-    crouchEnabled ? "ВСТАТЬ" : "ПРИСЕСТЬ"
-  );
+  crouchButton.setLabel(crouchEnabled ? "ВСТАТЬ" : "ПРИСЕСТЬ");
 });
 
 const jumpButton = makeButton("ПРЫЖОК", () => {
@@ -502,9 +320,7 @@ const jumpButton = makeButton("ПРЫЖОК", () => {
   const accepted = human.jump();
 
   setStatus(
-    accepted
-      ? "ПРЫЖОК: ПОДГОТОВКА"
-      : "ПРЫЖОК СЕЙЧАС НЕДОСТУПЕН"
+    accepted ? "ПРЫЖОК: ПОДГОТОВКА" : "ПРЫЖОК СЕЙЧАС НЕДОСТУПЕН"
   );
 });
 
@@ -530,9 +346,7 @@ const touchButton = makeButton("КАСАНИЯ: ON", () => {
     human.releaseTouch();
   }
 
-  touchButton.setLabel(
-    autoTouchEnabled ? "КАСАНИЯ: ON" : "КАСАНИЯ: OFF"
-  );
+  touchButton.setLabel(autoTouchEnabled ? "КАСАНИЯ: ON" : "КАСАНИЯ: OFF");
 });
 
 const styleButton = makeButton("СТИЛЬ: ATHLETIC", () => {
@@ -544,25 +358,20 @@ const styleButton = makeButton("СТИЛЬ: ATHLETIC", () => {
 
   human.applyPreset(selected);
 
-  styleButton.setLabel(
-    `СТИЛЬ: ${selected.toUpperCase()}`
-  );
+  styleButton.setLabel(`СТИЛЬ: ${selected.toUpperCase()}`);
 
   setStatus(`СТИЛЬ ДВИЖЕНИЯ: ${selected.toUpperCase()}`);
 });
 
 /* =========================================================
-   LOAD CHARACTER
+   LOAD CHARACTER + NIGHT PLAZA
 ========================================================= */
 
 async function loadCharacter() {
   try {
     setStatus("1/5 — Загрузка XBot…");
 
-    const response = await fetch(
-      MODEL_URL,
-      { cache: "no-store" }
-    );
+    const response = await fetch(MODEL_URL, { cache: "no-store" });
 
     if (!response.ok) {
       throw new Error(`XBot HTTP ${response.status}`);
@@ -576,9 +385,7 @@ async function loadCharacter() {
 
     setStatus("2/5 — Подготовка скелета…");
 
-    const canonical =
-      await canonicalizeGLBBones(sourceBuffer);
-
+    const canonical = await canonicalizeGLBBones(sourceBuffer);
     const canonicalBuffer = toArrayBuffer(canonical);
 
     if (!canonicalBuffer) {
@@ -610,7 +417,6 @@ async function loadCharacter() {
 
     scene.updateMatrixWorld(true);
 
-    // Одежда крепится к костям XBot до запуска locomotion.
     attachXbotOutfit(model);
 
     const leftFoot = findBone(model, "LeftFoot");
@@ -622,28 +428,15 @@ async function loadCharacter() {
       throw new Error("Не найдена полная цепочка стоп XBot");
     }
 
-    const leftFootPosition = leftFoot.getWorldPosition(
-      new THREE.Vector3()
-    );
-
-    const rightFootPosition = rightFoot.getWorldPosition(
-      new THREE.Vector3()
-    );
-
-    const leftToePosition = leftToe.getWorldPosition(
-      new THREE.Vector3()
-    );
-
-    const rightToePosition = rightToe.getWorldPosition(
-      new THREE.Vector3()
-    );
+    const leftFootPosition = leftFoot.getWorldPosition(new THREE.Vector3());
+    const rightFootPosition = rightFoot.getWorldPosition(new THREE.Vector3());
+    const leftToePosition = leftToe.getWorldPosition(new THREE.Vector3());
+    const rightToePosition = rightToe.getWorldPosition(new THREE.Vector3());
 
     forward
       .copy(leftToePosition)
       .sub(leftFootPosition)
-      .add(
-        rightToePosition.clone().sub(rightFootPosition)
-      )
+      .add(rightToePosition.clone().sub(rightFootPosition))
       .setY(0);
 
     if (forward.lengthSq() < 0.0001) {
@@ -651,38 +444,18 @@ async function loadCharacter() {
     }
 
     forward.normalize();
-
     right.crossVectors(forward, UP).normalize();
 
-    const stairYaw = Math.atan2(-forward.x, -forward.z);
+    setStatus("2.5/5 — Night Plaza…");
 
-    const firstColumn = forward
-      .clone()
-      .multiplyScalar(2.35)
-      .add(right.clone().multiplyScalar(0.1));
+    const plaza = buildNightPlaza(scene, {
+      forward,
+      origin: new THREE.Vector3(0, 0, 0),
+      enableShadows: false,
+    });
 
-    const secondColumn = forward
-      .clone()
-      .multiplyScalar(3.55)
-      .add(right.clone().multiplyScalar(-0.85));
-
-    createColumn(firstColumn, 0.4, 1.8);
-    createColumn(secondColumn, 0.34, 1.55);
-
-    const stairStart = forward
-      .clone()
-      .multiplyScalar(5.0);
-
-    const staircase = createStaircase(
-      stairStart,
-      stairYaw
-    );
-
-    const rampStart = stairStart
-      .clone()
-      .add(right.clone().multiplyScalar(2.0));
-
-    createRamp(rampStart, stairYaw, 0.36, 2.2);
+    groundMeshes.push(...plaza.groundMeshes);
+    obstacleMeshes.push(...plaza.obstacleMeshes);
 
     setStatus("3/5 — Подключение World Adapter…");
 
@@ -712,9 +485,9 @@ async function loadCharacter() {
       speedScale: "auto",
       seed: 27,
       config: {
-        maxStepUp: 0.35,
-        maxStepDown: 0.35,
-        maxExtraStepHeight: 0.3,
+        maxStepUp: 0.45,
+        maxStepDown: 0.45,
+        maxExtraStepHeight: 0.35,
         toeClearance: 0.025,
       },
     });
@@ -740,9 +513,7 @@ async function loadCharacter() {
     });
 
     human.on("land", ({ impactSpeed }) => {
-      setStatus(
-        `ПРИЗЕМЛЕНИЕ · УДАР ${impactSpeed.toFixed(2)} м/с`
-      );
+      setStatus(`ПРИЗЕМЛЕНИЕ · УДАР ${impactSpeed.toFixed(2)} м/с`);
     });
 
     human.on("touch", ({ side }) => {
@@ -752,8 +523,7 @@ async function loadCharacter() {
     updateCamera();
 
     setStatus(
-      "4/5 — СЦЕНА ГОТОВА\n" +
-      "Тапни за препятствиями или на лестницу"
+      "4/5 — NIGHT PLAZA ГОТОВА\nТапни на площадь, лестницу или арку"
     );
 
     console.log("[AstraWay] ADAPTIVE SYSTEM READY", {
@@ -762,17 +532,14 @@ async function loadCharacter() {
       speedScale: human.speedScale,
       warnings: human.warnings,
       world: worldDiagnostics,
-      stairHeight: staircase.height,
-      stairLength: staircase.length,
       autonomy: autonomyAgent.getState(),
+      plazaGround: plaza.groundMeshes.length,
+      plazaObstacles: plaza.obstacleMeshes.length,
     });
-
   } catch (error) {
     console.error("[AstraWay] INITIALIZATION ERROR", error);
 
-    setStatus(
-      "ОШИБКА: " + (error?.message || String(error))
-    );
+    setStatus("ОШИБКА: " + (error?.message || String(error)));
   }
 }
 
@@ -793,11 +560,8 @@ function moveToScreenPoint(event) {
 
   if (!rect.width || !rect.height) return;
 
-  pointer.x =
-    ((event.clientX - rect.left) / rect.width) * 2 - 1;
-
-  pointer.y =
-    -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
   raycaster.setFromCamera(pointer, camera);
 
@@ -830,7 +594,7 @@ function moveToScreenPoint(event) {
 
   setStatus(
     `${runEnabled ? "БЕГ" : "ХОДЬБА"} · ЦЕЛЬ ПРИНЯТА\n` +
-    `Расстояние: ${distance.toFixed(2)} м`
+      `Расстояние: ${distance.toFixed(2)} м`
   );
 
   console.log("[AstraWay] AUTONOMY GOAL", {
@@ -913,18 +677,13 @@ function animate(now) {
 
   if (human && autonomyAgent) {
     try {
-      // AutonomyAgent — единственный владелец human.update(dt).
-      // Реальный dt передаётся locomotion backend без внешнего clamp.
       autonomyAgent.update(dt);
-
       updateCamera();
       updateHUD(now);
     } catch (error) {
       console.error("[AstraWay] UPDATE ERROR", error);
 
-      setStatus(
-        "ОШИБКА ДВИЖЕНИЯ: " + error.message
-      );
+      setStatus("ОШИБКА ДВИЖЕНИЯ: " + error.message);
 
       autonomyAgent = null;
       human = null;
@@ -939,15 +698,11 @@ function animate(now) {
 ========================================================= */
 
 window.addEventListener("resize", () => {
-  camera.aspect =
-    window.innerWidth / Math.max(window.innerHeight, 1);
-
+  camera.aspect = window.innerWidth / Math.max(window.innerHeight, 1);
+  camera.projectionMatrixNeedsUpdate = true;
   camera.updateProjectionMatrix();
 
-  renderer.setSize(
-    window.innerWidth,
-    window.innerHeight
-  );
+  renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
 /* =========================================================
