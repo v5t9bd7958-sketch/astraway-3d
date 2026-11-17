@@ -1,9 +1,11 @@
+
 import * as THREE from "three";
 
 const STATE = Object.freeze({
   IDLE: "IDLE",
   MOVING: "MOVING",
   ARRIVED: "ARRIVED",
+  PARTIAL: "PARTIAL",
   RECOVERING: "RECOVERING",
   BLOCKED: "BLOCKED",
   DISPOSED: "DISPOSED",
@@ -25,6 +27,7 @@ export class AutonomyAgent {
     blockedSpeed = 0.05,
     blockedTimeout = 1.5,
     recoveryTimeout = 2.5,
+    goalProjectionTolerance = 0.12,
   } = {}) {
     if (
       !human ||
@@ -58,11 +61,20 @@ export class AutonomyAgent {
       blockedSpeed,
       blockedTimeout,
       recoveryTimeout,
+      goalProjectionTolerance,
     };
 
     this.state = STATE.IDLE;
     this.mode = MODE.WALK;
+
+    // Исходная цель пользователя.
     this.goal = null;
+
+    // Точка, которую фактически выбрал locomotion backend.
+    this.movementGoal = null;
+
+    this.goalReachability = "UNKNOWN";
+    this.lastGoalResult = null;
 
     this.sampleElapsed = 0;
     this.stagnantElapsed = 0;
@@ -85,6 +97,10 @@ export class AutonomyAgent {
     this._assertWorldReady();
 
     this.goal = point;
+    this.movementGoal = null;
+    this.goalReachability = "UNKNOWN";
+    this.lastGoalResult = null;
+
     this.recoveryAttempts = 0;
     this.sampleElapsed = 0;
     this.stagnantElapsed = 0;
@@ -97,6 +113,7 @@ export class AutonomyAgent {
       this.state = STATE.MOVING;
     } catch (error) {
       this.goal = null;
+      this.movementGoal = null;
       this.state = STATE.IDLE;
       throw error;
     }
@@ -133,7 +150,12 @@ export class AutonomyAgent {
     this._assertActive();
 
     this.human.stop();
+
     this.goal = null;
+    this.movementGoal = null;
+    this.goalReachability = "UNKNOWN";
+    this.lastGoalResult = null;
+
     this.state = STATE.IDLE;
 
     this.sampleElapsed = 0;
@@ -151,13 +173,10 @@ export class AutonomyAgent {
       return this.getState();
     }
 
-    // Передаём backend реальное время кадра.
-    // Сам locomotion backend выполняет внутреннее ограничение
-    // времени и разбиение на подшаги.
+    // Backend получает реальное время кадра.
     this.human.update(dt);
 
-    // Таймеры агента не должны перескакивать после возврата
-    // Safari из фона или длительной паузы вкладки.
+    // Таймеры агента защищены от длинной паузы вкладки.
     const delta = Math.min(dt, 0.25);
 
     if (
@@ -173,9 +192,7 @@ export class AutonomyAgent {
     this.sampleElapsed += delta;
 
     if (this._hasArrived()) {
-      this.state = STATE.ARRIVED;
-      this.goal = null;
-      this.stagnantElapsed = 0;
+      this._finishGoal();
       return this.getState();
     }
 
@@ -196,16 +213,41 @@ export class AutonomyAgent {
     return {
       state: this.state,
       mode: this.mode,
+
+      // Запрошенная точка.
       goal: this.goal ? this.goal.clone() : null,
+
+      // Реальная точка назначения backend.
+      movementGoal: this.movementGoal
+        ? this.movementGoal.clone()
+        : null,
+
+      // REACHABLE / PARTIAL / UNKNOWN.
+      goalReachability: this.goalReachability,
+
+      // Последний завершённый результат.
+      lastGoalResult: this.lastGoalResult
+        ? {
+            requested: this.lastGoalResult.requested.clone(),
+            destination: this.lastGoalResult.destination.clone(),
+            reachability: this.lastGoalResult.reachability,
+            offset: this.lastGoalResult.offset,
+          }
+        : null,
+
       position: position.clone(),
+
       speed: Number.isFinite(this.human.speed)
         ? this.human.speed
         : 0,
+
       heading: Number.isFinite(this.human.heading)
         ? this.human.heading
         : 0,
+
       airborne: !!this.human.airborne,
       recoveryAttempts: this.recoveryAttempts,
+
       world: this.worldAdapter
         ? this.worldAdapter.getDiagnostics()
         : null,
@@ -216,7 +258,11 @@ export class AutonomyAgent {
     if (this.disposed) return;
 
     this.human.stop();
+
     this.goal = null;
+    this.movementGoal = null;
+    this.lastGoalResult = null;
+
     this.state = STATE.DISPOSED;
     this.disposed = true;
     this.hasLastPosition = false;
@@ -235,6 +281,24 @@ export class AutonomyAgent {
         run: this.mode === MODE.RUN,
       }
     );
+
+    // Библиотека сама определяет ближайшую достижимую точку,
+    // если исходная цель недостижима.
+    const resolvedTarget = this.human.moveTarget;
+
+    this.movementGoal =
+      resolvedTarget?.isVector3
+        ? resolvedTarget.clone()
+        : this.goal.clone();
+
+    const offset = this.goal.distanceTo(
+      this.movementGoal
+    );
+
+    this.goalReachability =
+      offset > this.config.goalProjectionTolerance
+        ? "PARTIAL"
+        : "REACHABLE";
   }
 
   _evaluateProgress() {
@@ -246,7 +310,6 @@ export class AutonomyAgent {
       return;
     }
 
-    // Продвижение оценивается только в плоскости XZ.
     const dx = current.x - this.lastPosition.x;
     const dz = current.z - this.lastPosition.z;
     const progress = Math.sqrt(dx * dx + dz * dz);
@@ -294,6 +357,7 @@ export class AutonomyAgent {
       ) {
         this.state = STATE.BLOCKED;
       }
+
       return;
     }
 
@@ -301,7 +365,8 @@ export class AutonomyAgent {
     this.state = STATE.RECOVERING;
 
     try {
-      // Повторная передача цели backend для пересчёта маршрута.
+      // Повторная передача цели заставляет backend
+      // пересчитать маршрут с учётом текущей позиции.
       this._issueMovement();
 
       this.stagnantElapsed = 0;
@@ -314,8 +379,33 @@ export class AutonomyAgent {
     }
   }
 
+  _finishGoal() {
+    if (!this.goal || !this.movementGoal) return;
+
+    const requested = this.goal.clone();
+    const destination = this.movementGoal.clone();
+    const reachability = this.goalReachability;
+
+    this.lastGoalResult = {
+      requested,
+      destination,
+      reachability,
+      offset: requested.distanceTo(destination),
+    };
+
+    this.state =
+      reachability === "PARTIAL"
+        ? STATE.PARTIAL
+        : STATE.ARRIVED;
+
+    this.goal = null;
+    this.stagnantElapsed = 0;
+  }
+
   _hasArrived() {
-    if (!this.goal) return false;
+    if (!this.goal || !this.movementGoal) {
+      return false;
+    }
 
     return (
       this._distanceToGoal() <= this.config.arrivalRadius &&
@@ -327,10 +417,13 @@ export class AutonomyAgent {
   }
 
   _distanceToGoal() {
-    if (!this.goal) return Infinity;
+    if (!this.movementGoal) return Infinity;
 
-    const dx = this.goal.x - this.human.position.x;
-    const dz = this.goal.z - this.human.position.z;
+    const dx =
+      this.movementGoal.x - this.human.position.x;
+
+    const dz =
+      this.movementGoal.z - this.human.position.z;
 
     return Math.sqrt(dx * dx + dz * dz);
   }
