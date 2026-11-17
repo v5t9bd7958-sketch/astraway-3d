@@ -5,22 +5,6 @@ import {
   Task,
 } from "./Task.js";
 
-/**
- * LocomotionTaskGenerator
- *
- * Converts proxy locomotion foot targets into
- * soft effector-position tasks for the main rig.
- *
- * Does NOT:
- * - write bones;
- * - modify the skeleton;
- * - override planted support contacts;
- * - solve IK;
- * - make locomotion decisions.
- *
- * ContactTaskGenerator owns planted contacts.
- * LocomotionTaskGenerator owns swing targets.
- */
 export class LocomotionTaskGenerator {
   constructor({ taskSet, weight = 0.65 } = {}) {
     if (!taskSet) {
@@ -42,6 +26,7 @@ export class LocomotionTaskGenerator {
 
     this.lastFrame = 0;
     this.lastTaskCount = 0;
+    this.lastSuppressedCount = 0;
   }
 
   update(snapshot) {
@@ -52,47 +37,86 @@ export class LocomotionTaskGenerator {
     }
 
     let count = 0;
+    let suppressed = 0;
 
-    count += this._updateFoot(
+    const left = this._updateFoot(
       "left",
       snapshot.feet.left
     );
 
-    count += this._updateFoot(
+    const right = this._updateFoot(
       "right",
       snapshot.feet.right
     );
 
-    this.lastFrame = snapshot.frame ?? this.lastFrame + 1;
+    count += left.created;
+    count += right.created;
+
+    suppressed += left.suppressed;
+    suppressed += right.suppressed;
+
+    this.lastFrame =
+      snapshot.frame ?? this.lastFrame + 1;
+
     this.lastTaskCount = count;
+    this.lastSuppressedCount = suppressed;
 
     return {
       frame: this.lastFrame,
       taskCount: count,
+      suppressedCount: suppressed,
     };
   }
 
   _updateFoot(side, foot) {
     const taskId = this.taskIds[side];
 
+    const logicalBone = side === "left"
+      ? "foot_L"
+      : "foot_R";
+
     if (!foot) {
       this.taskSet.remove(taskId);
-      return 0;
+
+      return {
+        created: 0,
+        suppressed: 0,
+      };
     }
 
     /*
-     * Planted feet belong exclusively to
-     * ContactTaskGenerator.
+     * ContactTaskGenerator has authority over
+     * every established contact on this bone.
      *
-     * PLANT is also excluded: contact perception
-     * must establish the real support first.
+     * This prevents proxy swing targets from
+     * competing with real support/contact tasks.
+     */
+    if (this._hasContactAuthority(logicalBone)) {
+      this.taskSet.remove(taskId);
+
+      return {
+        created: 0,
+        suppressed: 1,
+      };
+    }
+
+    /*
+     * Only LIFT and SWING produce locomotion
+     * position targets.
+     *
+     * PLANT is not enough to establish support.
+     * ContactPerception must confirm it first.
      */
     if (
       foot.phase !== "LIFT" &&
       foot.phase !== "SWING"
     ) {
       this.taskSet.remove(taskId);
-      return 0;
+
+      return {
+        created: 0,
+        suppressed: 0,
+      };
     }
 
     const position = foot.position;
@@ -104,22 +128,24 @@ export class LocomotionTaskGenerator {
       !Number.isFinite(position.z)
     ) {
       this.taskSet.remove(taskId);
-      return 0;
-    }
 
-    const logicalBone = side === "left"
-      ? "foot_L"
-      : "foot_R";
+      return {
+        created: 0,
+        suppressed: 0,
+      };
+    }
 
     const task = new Task({
       id: taskId,
       type: TASK_TYPE.EFFECTOR_POSITION,
       source: "procedural_locomotion",
+
       target: [
         position.x,
         position.y,
         position.z,
       ],
+
       priority: TASK_PRIORITY.NORMAL,
       weight: this.weight,
       hard: false,
@@ -127,14 +153,19 @@ export class LocomotionTaskGenerator {
 
       metadata: {
         bone: logicalBone,
-        locomotionPhase: foot.phase,
         side,
-        swingProgress: Number.isFinite(foot.swingProgress)
+        locomotionPhase: foot.phase,
+
+        swingProgress: Number.isFinite(
+          foot.swingProgress
+        )
           ? foot.swingProgress
           : 0,
+
         stepCount: Number.isFinite(foot.steps)
           ? foot.steps
           : 0,
+
         intent: foot.intent ?? "swing",
         targetSpace: "world",
       },
@@ -142,7 +173,21 @@ export class LocomotionTaskGenerator {
 
     this.taskSet.upsert(task);
 
-    return 1;
+    return {
+      created: 1,
+      suppressed: 0,
+    };
+  }
+
+  _hasContactAuthority(logicalBone) {
+    return this.taskSet
+      .getEnabled()
+      .some((task) => {
+        return (
+          task.type === TASK_TYPE.CONTACT_MAINTAIN &&
+          task.metadata?.bone === logicalBone
+        );
+      });
   }
 
   clear() {
@@ -150,6 +195,7 @@ export class LocomotionTaskGenerator {
     this.taskSet.remove(this.taskIds.right);
 
     this.lastTaskCount = 0;
+    this.lastSuppressedCount = 0;
 
     return this;
   }
@@ -158,6 +204,7 @@ export class LocomotionTaskGenerator {
     return {
       frame: this.lastFrame,
       taskCount: this.lastTaskCount,
+      suppressedCount: this.lastSuppressedCount,
       weight: this.weight,
     };
   }
