@@ -1,5 +1,3 @@
-// src/walk-preview.js
-
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
@@ -71,13 +69,12 @@ const xbotMapping = {
 };
 
 /* =========================================================
-   RENDERER / SCENE
+   SCENE
 ========================================================= */
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
   antialias: true,
-  alpha: false,
   powerPreference: "high-performance",
 });
 
@@ -86,7 +83,7 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x070a12);
+scene.background = new THREE.Color(0x090b10);
 
 const camera = new THREE.PerspectiveCamera(
   38,
@@ -95,26 +92,34 @@ const camera = new THREE.PerspectiveCamera(
   150
 );
 
+scene.add(new THREE.HemisphereLight(0xdde8ff, 0x20232b, 2.2));
+
+const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
+keyLight.position.set(3, 7, 4);
+scene.add(keyLight);
+
+const fillLight = new THREE.DirectionalLight(0x8fa8ff, 0.9);
+fillLight.position.set(-4, 3, -3);
+scene.add(fillLight);
+
 /* =========================================================
-   BASE GROUND (fallback under plaza)
+   GROUND
 ========================================================= */
 
-const groundMeshes = [];
-const obstacleMeshes = [];
-
 const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(80, 80),
+  new THREE.PlaneGeometry(100, 100),
   new THREE.MeshStandardMaterial({
-    color: 0x0b0e16,
-    roughness: 0.95,
+    color: 0x151922,
+    roughness: 0.92,
   })
 );
+
 ground.rotation.x = -Math.PI / 2;
-ground.position.y = -0.02;
+ground.position.y = 0;
 ground.name = "WalkableGround";
-ground.visible = true;
 scene.add(ground);
-groundMeshes.push(ground);
+
+const groundMeshes = [ground];
 
 /* =========================================================
    TARGET MARKER
@@ -124,27 +129,30 @@ const targetMarker = new THREE.Group();
 targetMarker.visible = false;
 
 const markerRing = new THREE.Mesh(
-  new THREE.RingGeometry(0.22, 0.32, 32),
+  new THREE.RingGeometry(0.13, 0.19, 40),
   new THREE.MeshBasicMaterial({
-    color: 0x2ee6ff,
-    transparent: true,
-    opacity: 0.9,
+    color: 0x63d9ff,
     side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.95,
     depthWrite: false,
   })
 );
+
 markerRing.rotation.x = -Math.PI / 2;
+markerRing.position.y = 0.025;
 targetMarker.add(markerRing);
 
 const markerCenter = new THREE.Mesh(
-  new THREE.CircleGeometry(0.08, 20),
+  new THREE.CircleGeometry(0.045, 24),
   new THREE.MeshBasicMaterial({
-    color: 0xff3d9a,
+    color: 0xffffff,
     transparent: true,
     opacity: 0.9,
     depthWrite: false,
   })
 );
+
 markerCenter.rotation.x = -Math.PI / 2;
 markerCenter.position.y = 0.03;
 targetMarker.add(markerCenter);
@@ -160,23 +168,20 @@ loader.setMeshoptDecoder(MeshoptDecoder);
 
 const MODEL_URL = `${import.meta.env.BASE_URL}models/Xbot.glb`;
 
+let human = null;
+let autonomyAgent = null;
+let characterRoot = null;
+let worldAdapter = null;
+
 const UP = new THREE.Vector3(0, 1, 0);
 const forward = new THREE.Vector3(0, 0, -1);
 const right = new THREE.Vector3(1, 0, 0);
+
 const cameraOffset = new THREE.Vector3();
 const lookTarget = new THREE.Vector3();
 
-let characterRoot = null;
-let human = null;
-let worldAdapter = null;
-let autonomyAgent = null;
-
 function toArrayBuffer(value) {
-  if (!value) return null;
-
-  if (value instanceof ArrayBuffer) {
-    return value;
-  }
+  if (value instanceof ArrayBuffer) return value;
 
   if (ArrayBuffer.isView(value)) {
     return value.buffer.slice(
@@ -202,6 +207,153 @@ function findBone(root, name) {
   });
 
   return result;
+}
+
+/* =========================================================
+   ADAPTIVE WORLD GEOMETRY (legacy helpers kept unused)
+========================================================= */
+
+const obstacleMeshes = [];
+
+function createColumn(position, radius = 0.38, height = 1.8) {
+  const mesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(radius, radius, height, 24),
+    new THREE.MeshStandardMaterial({
+      color: 0x92704e,
+      roughness: 0.7,
+      metalness: 0.16,
+    })
+  );
+
+  mesh.position.set(position.x, height / 2, position.z);
+  mesh.name = "TouchableNavigationColumn";
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.userData.astraWay = { role: "obstacle" };
+
+  scene.add(mesh);
+  obstacleMeshes.push(mesh);
+
+  return mesh;
+}
+
+function createStaircase(start, stairYaw) {
+  const count = 5;
+  const tread = 0.34;
+  const rise = 0.12;
+  const width = 2.6;
+
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x394454,
+    roughness: 0.86,
+  });
+
+  for (let i = 0; i < count; i++) {
+    const height = rise * (i + 1);
+
+    const step = new THREE.Mesh(
+      new THREE.BoxGeometry(width, height, tread),
+      material
+    );
+
+    const position = start
+      .clone()
+      .add(forward.clone().multiplyScalar((i + 0.5) * tread));
+
+    step.position.set(position.x, height / 2, position.z);
+    step.rotation.y = stairYaw;
+    step.name = `AdaptiveStair_${i + 1}`;
+
+    scene.add(step);
+    groundMeshes.push(step);
+  }
+
+  const totalHeight = count * rise;
+
+  const landing = new THREE.Mesh(
+    new THREE.BoxGeometry(width, 0.2, 1.5),
+    material
+  );
+
+  const landingPosition = start
+    .clone()
+    .add(forward.clone().multiplyScalar(count * tread + 0.75));
+
+  landing.position.set(
+    landingPosition.x,
+    totalHeight - 0.1,
+    landingPosition.z
+  );
+
+  landing.rotation.y = stairYaw;
+  landing.name = "StairLanding";
+
+  scene.add(landing);
+  groundMeshes.push(landing);
+
+  return {
+    height: totalHeight,
+    length: count * tread,
+  };
+}
+
+function createRamp(start, rampYaw, rampHeight = 0.36, rampLength = 2.2) {
+  const width = 1.35;
+
+  const geometry = new THREE.BufferGeometry();
+
+  const vertices = new Float32Array([
+    -width / 2, 0, 0,
+    width / 2, 0, 0,
+    -width / 2, rampHeight, -rampLength,
+
+    width / 2, 0, 0,
+    width / 2, rampHeight, -rampLength,
+    -width / 2, rampHeight, -rampLength,
+  ]);
+
+  geometry.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
+  geometry.computeVertexNormals();
+
+  const ramp = new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({
+      color: 0x45616b,
+      roughness: 0.82,
+      side: THREE.FrontSide,
+    })
+  );
+
+  ramp.position.copy(start);
+  ramp.rotation.y = rampYaw;
+  ramp.name = "AdaptiveSlope";
+
+  scene.add(ramp);
+  groundMeshes.push(ramp);
+
+  const landing = new THREE.Mesh(
+    new THREE.BoxGeometry(width, 0.18, 0.9),
+    new THREE.MeshStandardMaterial({
+      color: 0x394454,
+      roughness: 0.86,
+    })
+  );
+
+  const landingPosition = start
+    .clone()
+    .add(forward.clone().multiplyScalar(rampLength + 0.45));
+
+  landing.position.set(
+    landingPosition.x,
+    rampHeight - 0.09,
+    landingPosition.z
+  );
+
+  landing.rotation.y = rampYaw;
+  landing.name = "RampLanding";
+
+  scene.add(landing);
+  groundMeshes.push(landing);
 }
 
 /* =========================================================
@@ -319,9 +471,7 @@ const jumpButton = makeButton("ПРЫЖОК", () => {
 
   const accepted = human.jump();
 
-  setStatus(
-    accepted ? "ПРЫЖОК: ПОДГОТОВКА" : "ПРЫЖОК СЕЙЧАС НЕДОСТУПЕН"
-  );
+  setStatus(accepted ? "ПРЫЖОК: ПОДГОТОВКА" : "ПРЫЖОК СЕЙЧАС НЕДОСТУПЕН");
 });
 
 const stopButton = makeButton("СТОП", () => {
@@ -364,7 +514,7 @@ const styleButton = makeButton("СТИЛЬ: ATHLETIC", () => {
 });
 
 /* =========================================================
-   LOAD CHARACTER + NIGHT PLAZA
+   LOAD CHARACTER
 ========================================================= */
 
 async function loadCharacter() {
@@ -417,6 +567,7 @@ async function loadCharacter() {
 
     scene.updateMatrixWorld(true);
 
+    // Одежда крепится к костям XBot до запуска locomotion.
     attachXbotOutfit(model);
 
     const leftFoot = findBone(model, "LeftFoot");
@@ -446,8 +597,7 @@ async function loadCharacter() {
     forward.normalize();
     right.crossVectors(forward, UP).normalize();
 
-    setStatus("2.5/5 — Night Plaza…");
-
+    // Night Plaza (вместо column / stair / ramp)
     const plaza = buildNightPlaza(scene, {
       forward,
       origin: new THREE.Vector3(0, 0, 0),
@@ -485,9 +635,9 @@ async function loadCharacter() {
       speedScale: "auto",
       seed: 27,
       config: {
-        maxStepUp: 0.45,
-        maxStepDown: 0.45,
-        maxExtraStepHeight: 0.35,
+        maxStepUp: 0.35,
+        maxStepDown: 0.35,
+        maxExtraStepHeight: 0.3,
         toeClearance: 0.025,
       },
     });
@@ -523,7 +673,7 @@ async function loadCharacter() {
     updateCamera();
 
     setStatus(
-      "4/5 — NIGHT PLAZA ГОТОВА\nТапни на площадь, лестницу или арку"
+      "4/5 — NIGHT PLAZA ГОТОВА\n" + "Тапни на площадь, лестницу или арку"
     );
 
     console.log("[AstraWay] ADAPTIVE SYSTEM READY", {
@@ -532,9 +682,9 @@ async function loadCharacter() {
       speedScale: human.speedScale,
       warnings: human.warnings,
       world: worldDiagnostics,
-      autonomy: autonomyAgent.getState(),
       plazaGround: plaza.groundMeshes.length,
       plazaObstacles: plaza.obstacleMeshes.length,
+      autonomy: autonomyAgent.getState(),
     });
   } catch (error) {
     console.error("[AstraWay] INITIALIZATION ERROR", error);
@@ -677,7 +827,9 @@ function animate(now) {
 
   if (human && autonomyAgent) {
     try {
+      // AutonomyAgent — единственный владелец human.update(dt).
       autonomyAgent.update(dt);
+
       updateCamera();
       updateHUD(now);
     } catch (error) {
@@ -699,7 +851,7 @@ function animate(now) {
 
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / Math.max(window.innerHeight, 1);
-  camera.projectionMatrixNeedsUpdate = true;
+
   camera.updateProjectionMatrix();
 
   renderer.setSize(window.innerWidth, window.innerHeight);
